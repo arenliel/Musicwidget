@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema para el selector de widgets (Soporte Material 3) -->
+    <!-- Tema refinado siguiendo el estándar de Metrolist (API 31+) -->
+    <style name="Theme.MusicWidget" parent="@android:style/Theme.DeviceDefault.DayNight" />
+
+    <style name="Theme.MusicWidget.Viewer" parent="Theme.MusicWidget">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

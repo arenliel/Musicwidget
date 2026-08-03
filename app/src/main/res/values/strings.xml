@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Music Widget</string>
+    <string name="widget_description">Muestra la música actual, el arte del álbum y permite ver la portada en alta resolución.</string>
+    <string name="widget_time_recently">— Recientemente</string>
+    <string name="widget_time_one_hour">— Hace 1 hora</string>
+    <string name="widget_time_hours">— Hace %d horas</string>
+    <string name="widget_time_days">— Hace días</string>
+    <string name="widget_empty_title">¡Reproduce algo!</string>
+    <string name="widget_empty_subtitle">Sin reproducción reciente</string>
+</resources>

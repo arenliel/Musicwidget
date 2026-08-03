@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 1. Superficie Base (Lienzo 172x200) -->
+    <item>
+        <shape>
+            <solid android:color="@color/music_widget_background" />
+            <corners android:radius="@android:dimen/system_app_widget_background_radius" />
+            <size android:width="172dp" android:height="200dp" />
+        </shape>
+    </item>
+
+    <!-- 2. Portada (Píldora reducida a 100dp para ligereza visual) -->
+    <item
+        android:top="17dp"
+        android:left="17dp"
+        android:width="100dp"
+        android:height="100dp"
+        android:gravity="top|start"
+        android:drawable="@drawable/ic_preview_pill" />
+
+    <!-- Nota Musical Central (Para el caso estático) -->
+    <item
+        android:top="51dp"
+        android:left="51dp"
+        android:width="32dp"
+        android:height="32dp"
+        android:gravity="top|start">
+        <selector xmlns:android="http://schemas.android.com/apk/res/android">
+            <item android:drawable="@drawable/ic_music_note" android:tint="@color/music_widget_accent" />
+        </selector>
+    </item>
+
+    <!-- 3. Visualizador de Estado (Contenedor Circular + Reloj) -->
+    <!-- Círculo de Fondo -->
+    <item
+        android:top="101dp"
+        android:left="87dp"
+        android:width="24dp"
+        android:height="24dp"
+        android:gravity="top|start">
+        <shape android:shape="oval">
+            <solid android:color="@color/music_widget_background" />
+        </shape>
+    </item>
+
+    <!-- Icono de Reloj al 85% -->
+    <item
+        android:top="103dp"
+        android:left="89dp"
+        android:width="20dp"
+        android:height="20dp"
+        android:gravity="top|start"
+        android:drawable="@drawable/ic_music_history" />
+
+    <!-- 4. Información Inferior (Barras más juntas y alineadas) -->
+
+    <!-- Icono de Nota -->
+    <item
+        android:bottom="36dp"
+        android:left="17dp"
+        android:width="14dp"
+        android:height="14dp"
+        android:gravity="bottom|start">
+        <vector xmlns:android="http://schemas.android.com/apk/res/android"
+            android:width="14dp"
+            android:height="14dp"
+            android:viewportWidth="24"
+            android:viewportHeight="24">
+            <path android:fillColor="@color/music_widget_accent"
+                  android:pathData="M12,3v10.55c-0.59,-0.34 -1.27,-0.55 -2,-0.55 -2.21,0 -4,1.79 -4,4s1.79,4 4,4 4,-1.79 4,-4V7h4V3H12z"/>
+        </vector>
+    </item>
+
+    <!-- Palabra Título 1 -->
+    <item
+        android:bottom="36dp"
+        android:left="36dp"
+        android:gravity="bottom|start">
+        <shape>
+            <solid android:color="@color/music_widget_text_primary" />
+            <corners android:radius="2dp" />
+            <size android:width="45dp" android:height="13dp" />
+        </shape>
+    </item>
+
+    <!-- Palabra Título 2 (Juntada a solo 2dp de la anterior) -->
+    <item
+        android:bottom="36dp"
+        android:left="83dp"
+        android:gravity="bottom|start">
+        <shape>
+            <solid android:color="@color/music_widget_text_primary" />
+            <corners android:radius="2dp" />
+            <size android:width="30dp" android:height="13dp" />
+        </shape>
+    </item>
+
+    <!-- Barra Artista (Acercada verticalmente al título) -->
+    <item
+        android:bottom="21dp"
+        android:left="17dp"
+        android:gravity="bottom|start">
+        <shape>
+            <solid android:color="@color/music_widget_text_secondary" />
+            <corners android:radius="2dp" />
+            <size android:width="65dp" android:height="9dp" />
+        </shape>
+    </item>
+</layer-list>

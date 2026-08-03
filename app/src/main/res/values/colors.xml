@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fallback colors for older Android or before dynamic sync -->
+    <color name="music_widget_background">#FFFFFF</color>
+    <color name="music_widget_pill">#EADDFF</color>
+    <color name="music_widget_accent">#6750A4</color>
+    <color name="music_widget_text_primary">#1C1B1F</color>
+    <color name="music_widget_text_secondary">#49454F</color>
+</resources>
