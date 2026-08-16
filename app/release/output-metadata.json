@@ -4,7 +4,7 @@
     "type": "APK",
     "kind": "Directory"
   },
-  "applicationId": "com.example.musicwidget",
+  "applicationId": "arenliel.musicwidget",
   "variantName": "release",
   "elements": [
     {
@@ -33,5 +33,5 @@
       ]
     }
   ],
-  "minSdkVersionForDexing": 31
+  "minSdkVersionForDexing": 26
 }

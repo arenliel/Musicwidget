@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="widget_corner_radius">16dp</dimen>
+    <dimen name="widget_padding">17dp</dimen>
+    <dimen name="album_art_size_classic">110dp</dimen>
+    <dimen name="album_art_size_mini">80dp</dimen>
+    <dimen name="visualizer_size">24dp</dimen>
+    <dimen name="icon_size_small">14dp</dimen>
+    <dimen name="icon_size_medium">16dp</dimen>
+    <dimen name="icon_size_large">24dp</dimen>
+    <dimen name="text_size_title">16sp</dimen>
+    <dimen name="text_size_artist">12sp</dimen>
+    <dimen name="text_size_status">10sp</dimen>
+    <dimen name="text_size_history_item_title">13sp</dimen>
+    <dimen name="text_size_history_item_artist">11sp</dimen>
+    <dimen name="text_size_history_header">11sp</dimen>
+    <dimen name="history_item_art_width">48dp</dimen>
+    <dimen name="history_item_art_height">28dp</dimen>
+    <dimen name="permission_box_size">40dp</dimen>
+    <dimen name="permission_icon_size">24dp</dimen>
+    <dimen name="history_header_icon_size">20dp</dimen>
+    <dimen name="history_item_chevron_size">20dp</dimen>
+    <dimen name="widget_min_width">110dp</dimen>
+    <dimen name="widget_min_height">110dp</dimen>
+    <dimen name="widget_min_height_small">40dp</dimen>
+    <dimen name="threshold_1cell_height">108dp</dimen>
+    <dimen name="skeleton_bar_title_width">80dp</dimen>
+    <dimen name="skeleton_bar_title_height">12dp</dimen>
+    <dimen name="skeleton_bar_artist_width">50dp</dimen>
+    <dimen name="skeleton_bar_artist_height">10dp</dimen>
+
+    <!-- Widget Layout Spacing -->
+    <dimen name="widget_content_margin_start">22dp</dimen>
+    <dimen name="widget_text_margin_top_large">32dp</dimen>
+
+    <!-- Visualizer Offsets (Standard/Large) -->
+    <dimen name="visualizer_offset_bottom">6dp</dimen>
+    <dimen name="visualizer_offset_end">6dp</dimen>
+
+    <!-- Skeleton Elements -->
+    <dimen name="skeleton_app_icon_size">16dp</dimen>
+    <dimen name="skeleton_art_inner_icon_size">32dp</dimen>
+    <dimen name="skeleton_status_width">60dp</dimen>
+</resources>

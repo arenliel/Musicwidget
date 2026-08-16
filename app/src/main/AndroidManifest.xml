@@ -4,6 +4,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
         <intent>
@@ -53,6 +54,14 @@
             android:noHistory="true"
             android:theme="@style/Theme.MusicWidget.Viewer" />
 
+        <activity
+            android:name=".PermissionsTrampolineActivity"
+            android:theme="@style/Theme.MusicWidget.Trampoline"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:exported="false" />
+
         <service
             android:name=".MusicNotificationListener"
             android:exported="true"
@@ -64,15 +73,42 @@
         </service>
 
         <receiver
-            android:name=".MusicWidgetReceiver"
+            android:name=".MusicWidgetFullReceiver"
             android:exported="true"
-            android:label="Music Widget">
+            android:label="@string/label_widget_full">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
-                android:resource="@xml/music_widget_info" />
+                android:resource="@xml/music_widget_info_full" />
+        </receiver>
+
+        <receiver
+            android:name=".MusicWidgetPillReceiver"
+            android:exported="true"
+            android:label="@string/label_widget_now_playing">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/music_widget_info_pill" />
+        </receiver>
+
+        <receiver
+            android:name=".MusicWidgetControlReceiver"
+            android:exported="true"
+            android:label="@string/label_widget_history">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/music_widget_info_control" />
         </receiver>
     </application>
 

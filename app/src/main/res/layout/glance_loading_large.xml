@@ -1,0 +1,107 @@
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/music_widget_background">
+
+    <!-- 1. Cabecera (Oculta v1.8.6) -->
+    <ImageView
+        android:layout_width="60dp"
+        android:layout_height="8dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentEnd="true"
+        android:layout_margin="16dp"
+        android:src="@drawable/preview_skeleton_pill"
+        android:visibility="gone"
+        android:contentDescription="@null" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="@dimen/widget_padding">
+
+        <!-- 2. Bloque Now Playing (Horizontal v1.5.3) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="16dp">
+
+            <!-- Píldora de Arte -->
+            <FrameLayout
+                android:id="@+id/loading_art_container_large"
+                android:layout_width="110dp"
+                android:layout_height="110dp">
+                <ImageView
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:src="@drawable/preview_skeleton_pill"
+                    android:contentDescription="@null" />
+            </FrameLayout>
+
+            <!-- Metadatos (Ecuador Visual v1.6.3) -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="@dimen/widget_content_margin_start"
+                android:orientation="vertical">
+                <ImageView
+                    android:layout_width="120dp"
+                    android:layout_height="12dp"
+                    android:src="@drawable/preview_skeleton_bar"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:layout_width="80dp"
+                    android:layout_height="8dp"
+                    android:layout_marginTop="6dp"
+                    android:src="@drawable/preview_skeleton_bar"
+                    android:alpha="0.6"
+                    android:contentDescription="@null" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 3. SECCIÓN HISTORIAL (Sincronía v1.8.4) -->
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+                <!-- Esqueleto Fila 1 -->
+                <ImageView
+                    android:layout_width="match_parent"
+                    android:layout_height="56dp"
+                    android:layout_marginBottom="4dp"
+                    android:src="@drawable/bg_preview_card"
+                    android:contentDescription="@null" />
+                <!-- Esqueleto Fila 2 -->
+                <ImageView
+                    android:layout_width="match_parent"
+                    android:layout_height="56dp"
+                    android:layout_marginBottom="4dp"
+                    android:src="@drawable/bg_preview_card"
+                    android:contentDescription="@null" />
+                <!-- Esqueleto Fila 3 -->
+                <ImageView
+                    android:layout_width="match_parent"
+                    android:layout_height="56dp"
+                    android:layout_marginBottom="4dp"
+                    android:src="@drawable/bg_preview_card"
+                    android:contentDescription="@null" />
+            </LinearLayout>
+
+            <!-- EL SCRIM DE DESVANECIMIENTO (v1.8.6) -->
+            <ImageView
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:layout_gravity="bottom"
+                android:src="@drawable/history_fade_scrim"
+                android:contentDescription="@null" />
+        </FrameLayout>
+    </LinearLayout>
+</RelativeLayout>

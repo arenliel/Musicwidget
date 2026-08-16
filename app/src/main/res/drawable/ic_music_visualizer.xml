@@ -4,6 +4,32 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+    <!-- Capa de Outline (Fondo protector) -->
+    <path
+        android:name="bar1_outline"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeColor="@color/music_widget_background"
+        android:pathData="M5,8 L5,16" />
+    <path
+        android:name="bar2_outline"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeColor="@color/music_widget_background"
+        android:pathData="M10,5 L10,19" />
+    <path
+        android:name="bar3_outline"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeColor="@color/music_widget_background"
+        android:pathData="M15,9 L15,15" />
+    <path
+        android:name="bar4_outline"
+        android:strokeWidth="7"
+        android:strokeLineCap="round"
+        android:strokeColor="@color/music_widget_background"
+        android:pathData="M20,7 L20,17" />
+
     <!-- Capa de Barras Reales -->
     <path
         android:name="bar1"

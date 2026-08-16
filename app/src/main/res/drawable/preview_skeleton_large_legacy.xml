@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Referencia de Lienzo (Evita que el Launcher lo estire o recorte mal) -->
+    <item android:width="250dp" android:height="110dp">
+        <shape><solid android:color="@android:color/transparent" /></shape>
+    </item>
+
+    <!-- Fondo del Widget con Esquinas de 16dp -->
+    <item>
+        <shape>
+            <solid android:color="@color/music_widget_background" />
+            <corners android:radius="16dp" />
+        </shape>
+    </item>
+
+    <!-- Píldora de Arte (Escalada para encajar en el margen) -->
+    <item
+        android:width="76dp"
+        android:height="76dp"
+        android:gravity="center_vertical|start"
+        android:start="17dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="24dp" />
+        </shape>
+    </item>
+
+    <!-- Esqueleto Título -->
+    <item
+        android:width="100dp"
+        android:height="12dp"
+        android:gravity="top|start"
+        android:start="108dp"
+        android:top="36dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="4dp" />
+        </shape>
+    </item>
+
+    <!-- Esqueleto Artista -->
+    <item
+        android:width="60dp"
+        android:height="8dp"
+        android:gravity="top|start"
+        android:start="108dp"
+        android:top="56dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="4dp" />
+        </shape>
+    </item>
+
+    <!-- Esqueleto Estado (Top End) -->
+    <item
+        android:width="40dp"
+        android:height="6dp"
+        android:gravity="top|end"
+        android:end="17dp"
+        android:top="17dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+</layer-list>

@@ -2,15 +2,19 @@
 <animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:drawable="@drawable/ic_music_visualizer">
-    <!-- Animación Bar 1 -->
+    <!-- Animación Bar 1 + Outline -->
     <target android:name="bar1"><aapt:attr name="android:animation"><objectAnimator android:duration="450" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M5,8 L5,16" android:valueTo="M5,11 L5,13" android:valueType="pathType" /></aapt:attr></target>
+    <target android:name="bar1_outline"><aapt:attr name="android:animation"><objectAnimator android:duration="450" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M5,8 L5,16" android:valueTo="M5,11 L5,13" android:valueType="pathType" /></aapt:attr></target>
 
-    <!-- Animación Bar 2 -->
+    <!-- Animación Bar 2 + Outline -->
     <target android:name="bar2"><aapt:attr name="android:animation"><objectAnimator android:duration="650" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M10,5 L10,19" android:valueTo="M10,10 L10,14" android:valueType="pathType" /></aapt:attr></target>
+    <target android:name="bar2_outline"><aapt:attr name="android:animation"><objectAnimator android:duration="650" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M10,5 L10,19" android:valueTo="M10,10 L10,14" android:valueType="pathType" /></aapt:attr></target>
 
-    <!-- Animación Bar 3 -->
+    <!-- Animación Bar 3 + Outline -->
     <target android:name="bar3"><aapt:attr name="android:animation"><objectAnimator android:duration="550" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M15,9 L15,15" android:valueTo="M15,11.5 L15,12.5" android:valueType="pathType" /></aapt:attr></target>
+    <target android:name="bar3_outline"><aapt:attr name="android:animation"><objectAnimator android:duration="550" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M15,9 L15,15" android:valueTo="M15,11.5 L15,12.5" android:valueType="pathType" /></aapt:attr></target>
 
-    <!-- Animación Bar 4 -->
+    <!-- Animación Bar 4 + Outline -->
     <target android:name="bar4"><aapt:attr name="android:animation"><objectAnimator android:duration="750" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M20,7 L20,17" android:valueTo="M20,11 L20,13" android:valueType="pathType" /></aapt:attr></target>
+    <target android:name="bar4_outline"><aapt:attr name="android:animation"><objectAnimator android:duration="750" android:propertyName="pathData" android:repeatCount="infinite" android:repeatMode="reverse" android:valueFrom="M20,7 L20,17" android:valueTo="M20,11 L20,13" android:valueType="pathType" /></aapt:attr></target>
 </animated-vector>

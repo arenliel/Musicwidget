@@ -1,10 +1,64 @@
 <resources>
     <string name="app_name">Music Widget</string>
     <string name="widget_description">Muestra la música actual, el arte del álbum y permite ver la portada en alta resolución.</string>
-    <string name="widget_time_recently">— Recientemente</string>
-    <string name="widget_time_one_hour">— Hace 1 hora</string>
-    <string name="widget_time_hours">— Hace %d horas</string>
-    <string name="widget_time_days">— Hace días</string>
-    <string name="widget_empty_title">¡Reproduce algo!</string>
-    <string name="widget_empty_subtitle">Sin reproducción reciente</string>
+    <string name="widget_time_recently">Hace poco</string>
+    <string name="widget_time_one_hour">Hace 1 hora</string>
+    <string name="widget_time_hours">Hace %d horas</string>
+    <string name="widget_time_days">Hace días</string>
+    <string name="widget_empty_title">Empieza a sonar</string>
+    <string name="widget_empty_subtitle">Toca para reproducir algo</string>
+    <string name="widget_permission_title">Faltan permisos</string>
+    <string name="widget_permission_subtitle">Toca para habilitar</string>
+
+    <!-- Widget Labels -->
+    <string name="label_widget_full">Portada completa</string>
+    <string name="label_widget_now_playing">Sonando</string>
+    <string name="label_widget_history">Historial de canciones</string>
+
+    <!-- Widget Descriptions -->
+    <string name="desc_full_widget">La portada del álbum ocupa todo el fondo. Diseño inmersivo sin márgenes.</string>
+    <string name="desc_pill_widget">Diseño clásico con portada en píldora. Se adapta dinámicamente al espacio.</string>
+    <string name="desc_control_widget">Versión expandida con historial de canciones. Ideal para el centro de tu pantalla.</string>
+
+    <!-- Accessibility -->
+    <string name="content_desc_album_art">Portada del álbum</string>
+    <string name="content_desc_visualizer">Visualizador de música</string>
+    <string name="content_desc_app_icon">Icono de la aplicación</string>
+    <string name="content_desc_clear_history">Limpiar historial</string>
+    <string name="content_desc_open_song">Abrir canción</string>
+    <string name="content_desc_no_artwork">Sin portada</string>
+    <string name="content_desc_notifications_permission">Permiso de notificaciones</string>
+    <string name="content_desc_battery_permission">Permiso de batería</string>
+    <string name="history_empty_state">El historial aparecerá aquí</string>
+    <string name="history_header">Recientes</string>
+    <string name="status_listening">Está sonando</string>
+    <string name="status_paused">En pausa</string>
+    <string name="status_recently">Hace poco</string>
+
+    <!-- Onboarding & Setup -->
+    <string name="setup_title">Primeros pasos</string>
+    <string name="setup_dashboard_title">Tus aplicaciones</string>
+    <string name="setup_finish_button">¡Todo listo!</string>
+
+    <string name="setup_battery_title">Actividad en segundo plano</string>
+    <string name="setup_battery_desc">Para mantener actualizado el widget, permite que se ejecute en segundo plano silenciosamente</string>
+    <string name="setup_battery_active">Optimización Desactivada</string>
+    <string name="setup_battery_inactive">Optimización Activa</string>
+    <string name="setup_battery_button">Ajustar</string>
+
+    <string name="setup_permissions_header">Permisos</string>
+
+    <string name="setup_notifications_title">Conexión musical</string>
+    <string name="setup_notifications_desc">Para mostrar lo que estás escuchando se necesita el acceso a las notificaciones</string>
+    <string name="setup_notifications_active">Acceso Activo</string>
+    <string name="setup_notifications_inactive">Acceso Desactivado</string>
+    <string name="setup_notifications_button">Permitir acceso a las notificaciones</string>
+
+    <string name="setup_restricted_title">Acceso protegido</string>
+    <string name="setup_restricted_desc">Por tu privacidad, Android limita el acceso en apps externas. Si no puedes activar los permisos, abre la \'Información de la app\' y selecciona \'Permitir ajustes restringidos\' en el menú superior.</string>
+    <string name="setup_restricted_button">Abrir información de app</string>
+
+    <string name="setup_diagnostic_button">Diagnóstico técnico</string>
+    <string name="setup_whitelist_title">Tus aplicaciones</string>
+    <string name="setup_whitelist_desc">Elige qué apps mostrarán música en el widget</string>
 </resources>

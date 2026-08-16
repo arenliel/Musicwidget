@@ -1,0 +1,5 @@
+- [ ] Extract strings to `strings.xml` for Onboarding and Settings
+- [ ] Implement `MainActivity` as a Dynamic Setup Wizard (Onboarding/Dashboard)
+- [ ] Update `MusicWidget` to redirect errors to `MainActivity`
+- [ ] Simplify `WidgetConfigActivity` by removing permission cards
+- [ ] Verify full flow (Fresh install -> Setup -> Dashboard -> Revocation)

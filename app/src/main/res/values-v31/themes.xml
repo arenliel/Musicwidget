@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Tema dinámico para Android 12+ (Material 3) -->
+    <style name="Theme.MusicWidget" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
+</resources>

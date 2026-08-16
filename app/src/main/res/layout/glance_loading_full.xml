@@ -1,0 +1,79 @@
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/music_widget_background">
+
+    <!-- 1. Icono de Hardware (Oculto v1.8.6) -->
+    <ImageView
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentStart="true"
+        android:layout_margin="@dimen/widget_padding"
+        android:src="@drawable/preview_skeleton_pill"
+        android:tint="@color/music_widget_on_surface_variant"
+        android:alpha="0.2"
+        android:visibility="gone"
+        android:contentDescription="@null" />
+
+    <!-- 2. Analítica (Oculta v1.8.6) -->
+    <ImageView
+        android:layout_width="40dp"
+        android:layout_height="12dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentEnd="true"
+        android:layout_margin="@dimen/widget_padding"
+        android:src="@drawable/preview_skeleton_pill"
+        android:visibility="gone"
+        android:contentDescription="@null" />
+
+    <!-- 3. Visualizador (Silueta sutil) -->
+    <ImageView
+        android:layout_width="@dimen/visualizer_size"
+        android:layout_height="@dimen/visualizer_size"
+        android:layout_alignParentBottom="true"
+        android:layout_alignParentEnd="true"
+        android:layout_marginBottom="@dimen/widget_padding"
+        android:layout_marginEnd="@dimen/widget_padding"
+        android:src="@drawable/preview_skeleton_pill"
+        android:tint="@color/music_widget_on_surface_variant"
+        android:alpha="0.2"
+        android:contentDescription="@null" />
+
+    <!-- 4. Metadatos Inferiores (Ecuador Visual v1.6.3) -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:layout_alignParentStart="true"
+        android:padding="@dimen/widget_padding"
+        android:orientation="vertical">
+
+        <!-- Bar: PlaybackStatusIndicator (Oculto v1.8.6) -->
+        <ImageView
+            android:layout_width="60dp"
+            android:layout_height="8dp"
+            android:layout_marginBottom="4dp"
+            android:src="@drawable/preview_skeleton_bar"
+            android:tint="@color/music_widget_on_surface_variant"
+            android:alpha="0.2"
+            android:visibility="gone"
+            android:contentDescription="@null" />
+
+        <!-- Bar: Title -->
+        <ImageView
+            android:layout_width="100dp"
+            android:layout_height="12dp"
+            android:src="@drawable/preview_skeleton_bar"
+            android:contentDescription="@null" />
+
+        <!-- Bar: Artist -->
+        <ImageView
+            android:layout_width="60dp"
+            android:layout_height="8dp"
+            android:layout_marginTop="2dp"
+            android:src="@drawable/preview_skeleton_bar"
+            android:alpha="0.6"
+            android:contentDescription="@null" />
+    </LinearLayout>
+</RelativeLayout>

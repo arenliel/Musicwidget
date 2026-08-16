@@ -4,6 +4,14 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+    <!-- Capa de Outline para los puntos -->
+    <path
+        android:fillColor="@color/music_widget_background"
+        android:pathData="M5,12m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0
+                  M10,12m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0
+                  M15,12m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0
+                  M20,12m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0" />
+
     <!-- Puntos Reales (Ondas en reposo) -->
     <path
         android:fillColor="@android:color/system_accent1_400"

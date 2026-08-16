@@ -1,0 +1,347 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="@dimen/widget_padding"
+    android:background="@drawable/bg_widget_root_v31"
+    android:theme="@style/Theme.MusicWidget"
+    android:clipToOutline="true">
+
+    <!-- BLOQUE NOW PLAYING: Horizontal -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="16dp">
+
+        <!-- LADO IZQUIERDO: Portada e indicadores perimetrales -->
+        <RelativeLayout
+            android:id="@+id/art_visualizer_container"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content">
+
+            <FrameLayout
+                android:id="@+id/preview_art_container"
+                android:layout_width="@dimen/album_art_size_classic"
+                android:layout_height="@dimen/album_art_size_classic">
+                <ImageView
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:src="@drawable/ic_preview_pill"
+                    android:contentDescription="@null" />
+                <ImageView
+                    android:layout_width="@dimen/skeleton_art_inner_icon_size"
+                    android:layout_height="@dimen/skeleton_art_inner_icon_size"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_music_note"
+                    android:tint="@color/music_widget_accent"
+                    android:alpha="0.6"
+                    android:contentDescription="@null" />
+
+                <!-- Icono de Hardware (Oculto en previsualización v1.7.0) -->
+                <ImageView
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:layout_gravity="top|start"
+                    android:layout_margin="4dp"
+                    android:background="@drawable/bg_preview_badge_pill"
+                    android:padding="2dp"
+                    android:src="@drawable/ic_device_phone"
+                    android:tint="@color/music_widget_on_tertiary_container"
+                    android:visibility="gone"
+                    android:contentDescription="@null" />
+            </FrameLayout>
+
+            <!-- Visualizador (Bottom End) -->
+            <ImageView
+                android:id="@+id/preview_visualizer"
+                android:layout_width="@dimen/visualizer_size"
+                android:layout_height="@dimen/visualizer_size"
+                android:layout_alignBottom="@id/preview_art_container"
+                android:layout_alignEnd="@id/preview_art_container"
+                android:layout_marginBottom="@dimen/visualizer_offset_bottom"
+                android:layout_marginEnd="@dimen/visualizer_offset_end"
+                android:src="@drawable/ic_music_history"
+                android:tint="@color/music_widget_accent"
+                android:contentDescription="@string/content_desc_visualizer" />
+        </RelativeLayout>
+
+        <!-- LADO DERECHO: Columna de información (Vertical) -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="12dp"
+            android:orientation="vertical">
+
+            <!-- 1. Badge de Analítica (Oculto en previsualización v1.7.0) -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end"
+                android:background="@drawable/bg_preview_badge_pill"
+                android:paddingHorizontal="8dp"
+                android:paddingVertical="4dp"
+                android:orientation="horizontal"
+                android:visibility="gone"
+                android:gravity="center">
+                <ImageView
+                    android:layout_width="12dp"
+                    android:layout_height="12dp"
+                    android:src="@drawable/mode_heat_24px"
+                    android:tint="@color/music_widget_on_tertiary_container"
+                    android:contentDescription="@null" />
+            </LinearLayout>
+
+            <!-- 2. Metadatos (Centrados Verticalmente v1.7.2) -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/status_listening"
+                    android:textSize="10sp"
+                    android:textAllCaps="true"
+                    android:textStyle="bold"
+                    android:textColor="@color/music_widget_on_surface_variant"
+                    android:visibility="gone"
+                    android:maxLines="1"
+                    android:ellipsize="end" />
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                    <ImageView
+                        android:layout_width="@dimen/icon_size_medium"
+                        android:layout_height="@dimen/icon_size_medium"
+                        android:layout_marginEnd="6dp"
+                        android:src="@drawable/ic_music_note"
+                        android:tint="@color/music_widget_accent"
+                        android:visibility="gone"
+                        android:contentDescription="@string/content_desc_app_icon" />
+                    <TextView
+                        style="@style/WidgetPreview_Title"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/widget_empty_title" />
+                </LinearLayout>
+
+                <TextView
+                    style="@style/WidgetPreview_Artist"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="@string/widget_empty_subtitle" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- HISTORIAL RECIENTE -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- Header -->
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp">
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_alignParentStart="true"
+                    android:text="@string/history_header"
+                    android:textSize="@dimen/text_size_history_header"
+                    android:textColor="@color/music_widget_accent"
+                    android:textStyle="bold" />
+                <ImageView
+                    android:layout_width="@dimen/history_header_icon_size"
+                    android:layout_height="@dimen/history_header_icon_size"
+                    android:layout_alignParentEnd="true"
+                    android:src="@drawable/clear_all_24px"
+                    android:tint="@color/music_widget_on_surface_variant"
+                    android:visibility="gone"
+                    android:contentDescription="@string/content_desc_clear_history" />
+            </RelativeLayout>
+
+            <!-- Fila 1 (Esqueleto v1.7.2) -->
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_preview_card"
+                android:padding="8dp">
+                <ImageView
+                    android:id="@+id/h1_art"
+                    android:layout_width="@dimen/history_item_art_width"
+                    android:layout_height="@dimen/history_item_art_height"
+                    android:layout_centerVertical="true"
+                    android:background="@drawable/bg_badge_note"
+                    android:src="@drawable/ic_music_note"
+                    android:padding="6dp"
+                    android:tint="@color/music_widget_accent"
+                    android:contentDescription="@null" />
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_toEndOf="@id/h1_art"
+                    android:layout_marginStart="12dp"
+                    android:layout_centerVertical="true"
+                    android:orientation="vertical">
+                    <ImageView
+                        android:layout_width="80dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:contentDescription="@null" />
+                    <ImageView
+                        android:layout_width="50dp"
+                        android:layout_height="10dp"
+                        android:layout_marginTop="4dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:alpha="0.6"
+                        android:contentDescription="@null" />
+                </LinearLayout>
+            </RelativeLayout>
+
+            <!-- Fila 2 (Esqueleto v1.7.2) -->
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_preview_card"
+                android:padding="8dp">
+                <ImageView
+                    android:id="@+id/h2_art"
+                    android:layout_width="@dimen/history_item_art_width"
+                    android:layout_height="@dimen/history_item_art_height"
+                    android:layout_centerVertical="true"
+                    android:background="@drawable/bg_badge_note"
+                    android:src="@drawable/ic_music_note"
+                    android:padding="6dp"
+                    android:tint="@color/music_widget_accent"
+                    android:contentDescription="@null" />
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_toEndOf="@id/h2_art"
+                    android:layout_marginStart="12dp"
+                    android:layout_centerVertical="true"
+                    android:orientation="vertical">
+                    <ImageView
+                        android:layout_width="100dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:contentDescription="@null" />
+                    <ImageView
+                        android:layout_width="60dp"
+                        android:layout_height="10dp"
+                        android:layout_marginTop="4dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:alpha="0.6"
+                        android:contentDescription="@null" />
+                </LinearLayout>
+            </RelativeLayout>
+
+            <!-- Fila 3 (Esqueleto v1.7.2) -->
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_preview_card"
+                android:padding="8dp">
+                <ImageView
+                    android:id="@+id/h3_art"
+                    android:layout_width="@dimen/history_item_art_width"
+                    android:layout_height="@dimen/history_item_art_height"
+                    android:layout_centerVertical="true"
+                    android:background="@drawable/bg_badge_note"
+                    android:src="@drawable/ic_music_note"
+                    android:padding="6dp"
+                    android:tint="@color/music_widget_accent"
+                    android:contentDescription="@null" />
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_toEndOf="@id/h3_art"
+                    android:layout_marginStart="12dp"
+                    android:layout_centerVertical="true"
+                    android:orientation="vertical">
+                    <ImageView
+                        android:layout_width="70dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:contentDescription="@null" />
+                    <ImageView
+                        android:layout_width="40dp"
+                        android:layout_height="10dp"
+                        android:layout_marginTop="4dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:alpha="0.6"
+                        android:contentDescription="@null" />
+                </LinearLayout>
+            </RelativeLayout>
+
+            <!-- Fila 4 (Esqueleto v1.8.4 - Showcase de profundidad) -->
+            <RelativeLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_preview_card"
+                android:padding="8dp">
+                <ImageView
+                    android:id="@+id/h4_art"
+                    android:layout_width="@dimen/history_item_art_width"
+                    android:layout_height="@dimen/history_item_art_height"
+                    android:layout_centerVertical="true"
+                    android:background="@drawable/bg_badge_note"
+                    android:src="@drawable/ic_music_note"
+                    android:padding="6dp"
+                    android:tint="@color/music_widget_accent"
+                    android:contentDescription="@null" />
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_toEndOf="@id/h4_art"
+                    android:layout_marginStart="12dp"
+                    android:layout_centerVertical="true"
+                    android:orientation="vertical">
+                    <ImageView
+                        android:layout_width="60dp"
+                        android:layout_height="12dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:contentDescription="@null" />
+                    <ImageView
+                        android:layout_width="35dp"
+                        android:layout_height="10dp"
+                        android:layout_marginTop="4dp"
+                        android:src="@drawable/preview_skeleton_bar"
+                        android:alpha="0.6"
+                        android:contentDescription="@null" />
+                </LinearLayout>
+            </RelativeLayout>
+        </LinearLayout>
+
+        <!-- EL SCRIM DE DESVANECIMIENTO (v1.8.4) -->
+        <ImageView
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_gravity="bottom"
+            android:src="@drawable/history_fade_scrim"
+            android:contentDescription="@null" />
+    </FrameLayout>
+</LinearLayout>

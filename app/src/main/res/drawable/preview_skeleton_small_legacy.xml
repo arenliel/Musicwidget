@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Referencia de Lienzo 2:1 Bajo -->
+    <item android:width="110dp" android:height="40dp">
+        <shape><solid android:color="@android:color/transparent" /></shape>
+    </item>
+
+    <item>
+        <shape>
+            <solid android:color="@color/music_widget_background" />
+            <corners android:radius="16dp" />
+        </shape>
+    </item>
+
+    <!-- Título -->
+    <item
+        android:width="60dp"
+        android:height="8dp"
+        android:gravity="center_vertical|start"
+        android:start="17dp"
+        android:top="-6dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="4dp" />
+        </shape>
+    </item>
+
+    <!-- Subtítulo -->
+    <item
+        android:width="40dp"
+        android:height="6dp"
+        android:gravity="center_vertical|start"
+        android:start="17dp"
+        android:top="10dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="3dp" />
+        </shape>
+    </item>
+
+    <!-- Icono Visualizador -->
+    <item
+        android:width="16dp"
+        android:height="16dp"
+        android:gravity="center_vertical|end"
+        android:end="17dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</layer-list>

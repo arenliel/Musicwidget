@@ -1,5 +1,6 @@
 package arenliel.musicwidget
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProviderInfo
@@ -7,17 +8,21 @@ import android.content.ComponentName
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import android.util.LruCache
 import android.widget.RemoteViews
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -34,24 +39,33 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
+import java.net.SocketException
 import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import kotlin.math.max
 
 class MusicNotificationListener : NotificationListenerService() {
 
     private lateinit var mediaSessionManager: MediaSessionManager
     private lateinit var musicDataStore: MusicDataStore
+    private lateinit var lyricsRepository: LyricsRepository
 
     private val serviceJob = SupervisorJob()
 
@@ -92,16 +106,60 @@ class MusicNotificationListener : NotificationListenerService() {
     private var pendingRefreshJob: Job? = null
 
     /*
+     * BÓVEDA DE ICONOS (v2.3): Persistencia volátil del mejor icono por paquete.
+     * Evita el parpadeo visual al cambiar de pista en la misma aplicación.
+     */
+    private val iconVault = mutableMapOf<String, Pair<Bitmap, Int>>()
+
+    /*
      * Controller seleccionado actualmente.
      */
     private var selectedController: MediaController? = null
 
-    private data class LyricsEntry(val timestampMs: Long, val text: String)
-    private data class LyricsResult(val trackKey: String, val entries: List<LyricsEntry>)
+    /*
+     * Caché de audio para evitar refrescos constantes.
+     */
+    private var cachedAudioDeviceName: String = "Altavoz del teléfono"
+    private var cachedAudioDeviceType: Int = AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+
+    private val audioDeviceCallback = object : android.media.AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+            syncPlaybackDevice()
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+            syncPlaybackDevice()
+        }
+    }
 
     private var currentLyrics: LyricsResult? = null
     private var lyricsUpdateJob: Job? = null
     private var lyricsFetchJob: Job? = null
+    private var unlockPollingJob: Job? = null
+
+    /*
+     * Flow para procesar eventos de Seek con compensación de latencia.
+     */
+    private val seekEventFlow = MutableSharedFlow<Triple<MediaSnapshot, Long, Long>>(
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    /*
+     * Eventos de actualización para el despacho adaptativo (v2.0).
+     */
+    private sealed class UpdateEvent {
+        data class IdentityChange(val trackKey: String) : UpdateEvent()
+        object StatusUpdate : UpdateEvent()
+    }
+
+    /*
+     * Flow para centralizar y consolidar actualizaciones de la interfaz (Atómico).
+     */
+    private val uiUpdateFlow = MutableSharedFlow<UpdateEvent>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     /*
      * Snapshot más reciente observado.
@@ -112,14 +170,39 @@ class MusicNotificationListener : NotificationListenerService() {
     private var lastObservedSnapshot: MediaSnapshot? = null
 
     /*
-     * Snapshot cuya actualización terminó correctamente.
+     * Snapshot cuya actualización terminó correctamente (Estado Visual).
      */
     private var lastAppliedSnapshot: MediaSnapshot? = null
+
+    /*
+     * Snapshot más reciente procesado por la lógica de negocio (Estado Lógico).
+     * Permite que el historial y la deduplicación funcionen con la pantalla apagada.
+     */
+    private var lastLogicalSnapshot: MediaSnapshot? = null
 
     /*
      * Snapshot actualmente en proceso.
      */
     private var inFlightSnapshot: MediaSnapshot? = null
+
+    /*
+     * Control de visibilidad para Screen-Gated Rendering.
+     */
+    @Volatile
+    private var isPresentationDirty: Boolean = false
+    private var pendingSnapshot: MediaSnapshot? = null
+
+    /*
+     * DEDUPLICADOR DE EVENTOS (Capa de Negocio)
+     * Evita que ráfagas de callbacks procesen la misma canción y resultado varias veces.
+     */
+    private var lastProcessedTrack: String? = null
+    private var lastProcessedOutcome: String? = null
+
+    private val historyChannel = Channel<MediaSnapshot>(
+        capacity = 50,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
     /*
      * Generation monotónica.
@@ -167,6 +250,70 @@ class MusicNotificationListener : NotificationListenerService() {
      * Icono de la app guardado actualmente en disco.
      */
     private var savedAppIconKey: String? = null
+    private var currentIconTier: Int = TIER_NONE
+
+    /*
+     * Receptor dinámico para estados de pantalla.
+     */
+    private val dynamicScreenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: android.content.Intent) {
+            when (intent.action) {
+                android.content.Intent.ACTION_SCREEN_OFF -> {
+                    onDisplayBecameUnavailable()
+                }
+                android.content.Intent.ACTION_SCREEN_ON -> {
+                    // Cancelar cualquier sondeo previo para evitar duplicados
+                    unlockPollingJob?.cancel()
+
+                    val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+
+                    if (isWidgetPotentiallyVisible()) {
+                        onDisplayFullyVisible()
+                    } else if (km.isKeyguardLocked) {
+                        // Arrancar sondeo acotado si está bloqueado (recuperación proactiva)
+                        unlockPollingJob = serviceScope.launch {
+                            try {
+                                repeat(15) {
+                                    if (!km.isKeyguardLocked) {
+                                        onDisplayFullyVisible()
+                                        return@launch
+                                    }
+                                    delay(1000)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isWidgetPotentiallyVisible(): Boolean {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        
+        return powerManager.isInteractive && !keyguardManager.isKeyguardLocked
+    }
+
+    private fun onDisplayBecameUnavailable() {
+        Log.d(TAG, "[GATING] Display unavailable. Closing gate.")
+        InternalLogger.log(applicationContext, "GATING: Pantalla apagada. Compuerta CERRADA.")
+        lyricsUpdateJob?.cancel()
+        unlockPollingJob?.cancel()
+    }
+
+    private fun onDisplayFullyVisible() {
+        Log.d(TAG, "[GATING] Display fully visible. Triggering Wake-up Sync.")
+        InternalLogger.log(applicationContext, "GATING: Desbloqueo detectado. Forzando reprocesamiento de sesión.")
+        
+        // Sincronización de recuperación:
+        // Forzamos al proceso a descargar recursos que se omitieron durante el bloqueo.
+        serviceScope.launch {
+            refreshBestSession(reason = "catch_up_render")
+        }
+    }
 
     /*
      * Último título enviado a la preview para evitar duplicados innecesarios.
@@ -181,7 +328,6 @@ class MusicNotificationListener : NotificationListenerService() {
 
     /*
      * Cache de artwork en memoria.
-
      * La clave es artworkUri o un fallback estable.
      */
     private val artworkCache =
@@ -206,6 +352,12 @@ class MusicNotificationListener : NotificationListenerService() {
                 )
             }
 
+    private sealed class ArtworkSource {
+        data class Bitmap(val bitmap: android.graphics.Bitmap) : ArtworkSource()
+        data class Uri(val uri: String) : ArtworkSource()
+        data object Placeholder : ArtworkSource()
+    }
+
     private data class MediaSnapshot(
         val packageName: String,
         val title: String,
@@ -215,30 +367,32 @@ class MusicNotificationListener : NotificationListenerService() {
         val artworkUri: String?,
         val playbackState: Int,
         val isSessionActive: Boolean,
+        val playbackDeviceName: String,
         val durationMs: Long = 0L,
         val positionMs: Long = 0L,
-        val recordedAt: Long = System.currentTimeMillis()
+        val recordedAt: Long = System.currentTimeMillis(),
+        val artworkSource: ArtworkSource = ArtworkSource.Placeholder,
+        val firstObservedAt: Long = recordedAt,
+        val maxPositionMs: Long = positionMs,
+        val observedAtRealtime: Long = SystemClock.elapsedRealtime(),
+        val playbackDeviceType: Int = AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
     ) {
+        /*
+         * Identidad de sesión (Inmune a refinamientos de álbum/duración).
+         */
+        val sessionIdentity: String
+            get() = "$packageName|$title|$artist"
 
         /*
-         * Identidad lógica de la pista.
+         * Identidad lógica de la pista (Hash robusto).
          */
         val trackKey: String
             get() = buildString {
-
-                append(packageName)
-                append('|')
-
-                append(mediaId.orEmpty())
-                append('|')
-
                 append(title)
                 append('|')
-
                 append(artist)
                 append('|')
-
-                append(album.orEmpty())
+                append(durationMs)
             }
 
         /*
@@ -250,29 +404,14 @@ class MusicNotificationListener : NotificationListenerService() {
                     ?.takeIf {
                         it.isNotBlank()
                     }
-                    ?: buildString {
-
-                        append(packageName)
-                        append('|')
-
-                        append(mediaId.orEmpty())
-                        append('|')
-
-                        append(title)
-                        append('|')
-
-                        append(artist)
-                        append('|')
-
-                        append(album.orEmpty())
-                    }
+                    ?: trackKey
 
         /*
          * Identidad completa del snapshot.
+         * Incluye la posición redondeada para detectar Seeks significativos.
          */
         val contentKey: String
-            get() =
-                "$trackKey|$artworkKey|$playbackState"
+            get() = "$trackKey|$artworkKey|$playbackState|${positionMs / 1000}"
     }
 
     override fun onCreate() {
@@ -288,13 +427,291 @@ class MusicNotificationListener : NotificationListenerService() {
             MusicDataStore(
                 applicationContext
             )
+
+        lyricsRepository = LyricsRepository(applicationContext)
+
+        startHistoryProcessor()
+        startSeekEventProcessor()
+        startUiUpdateDispatcher()
+        startBlacklistObserver()
+
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
+        syncPlaybackDevice()
+    }
+
+    private fun syncPlaybackDevice() {
+        val (name, type) = getPlaybackDeviceInfo(applicationContext)
+        if (cachedAudioDeviceName != name || cachedAudioDeviceType != type) {
+            cachedAudioDeviceName = name
+            cachedAudioDeviceType = type
+            
+            // Si hay una sesión activa, actualizamos quirúrgicamente a través del DataStore
+            serviceScope.launch {
+                musicDataStore.updatePlaybackDevice(name, type)
+                
+                // SYNC RAM (v4.0): Relevo Atómico de Dispositivo
+            val current = MusicStateProvider.current()
+            val changed = MusicStateProvider.applyEvent(MusicUpdateEvent.StatusUpdate(
+                isPlaying = current.isPlaying,
+                deviceName = name,
+                deviceType = type
+            ))
+            if (changed) {
+                uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+            }
+            }
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun startUiUpdateDispatcher() {
+        serviceScope.launch {
+            uiUpdateFlow
+                .debounce { event ->
+                    when (event) {
+                        is UpdateEvent.IdentityChange -> 50L
+                        is UpdateEvent.StatusUpdate -> 150L
+                    }
+                }
+                .collect { event ->
+                    // REGLA DE ORO (v2.9): Hiato total en reposo para ahorro de batería (Batería Cero)
+                    if (!isWidgetPotentiallyVisible()) {
+                        Log.d(TAG, "[DIAGNOSTIC] UI_DISPATCHER: Widget no visible. Postponing update.")
+                        
+                        // Hallazgo v3.5: Cancelación física del Ticker en reposo
+                        lyricsUpdateJob?.cancel()
+                        return@collect
+                    }
+
+                    // Hallazgo v3.5: Recuperación proactiva del Ticker al despertar (ACTION_USER_PRESENT indirecto)
+                    if (lyricsUpdateJob?.isActive != true && currentLyrics != null) {
+                        relaunchLyricsTicker("screen_wake")
+                    }
+
+                    Log.d(TAG, "[DIAGNOSTIC] UI_DISPATCHER: Ejecutando actualización atómica de Glance (Event=$event)")
+                    runCatching {
+                        MusicWidget.updateAll(applicationContext)
+                    }.onFailure { e ->
+                        Log.w(TAG, "Fallo al actualizar Glance (Posible desincronización de widget info)", e)
+                    }
+                }
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun startSeekEventProcessor() {
+        serviceScope.launch {
+            seekEventFlow
+                .debounce(400L)
+                .collect { (snapshot, position, detectedAt) ->
+                    val now = SystemClock.elapsedRealtime()
+                    val processingLag = now - detectedAt
+                    Log.d(TAG, "[LYRICS_TRACE] Aplicando Seek (Lag compensado: ${processingLag}ms): ${position + processingLag}ms")
+                    
+                    val updatedSnapshot = snapshot.copy(
+                        positionMs = position + processingLag,
+                        observedAtRealtime = now
+                    )
+                    lastLogicalSnapshot = updatedSnapshot
+                    relaunchLyricsTicker("seek_event")
+                }
+        }
+    }
+
+    private fun startHistoryProcessor() {
+        serviceScope.launch {
+            for (snapshot in historyChannel) {
+                processHistoryEvent(snapshot)
+            }
+        }
+    }
+
+    private fun startBlacklistObserver() {
+        serviceScope.launch {
+            musicDataStore.musicInfoFlow.collect { info ->
+                val currentPkg = lastObservedSnapshot?.packageName
+                if (currentPkg != null && info.blacklist.contains(currentPkg)) {
+                    Log.d(TAG, "[BLACKLIST_PURGE] App actual $currentPkg ha sido añadida a la lista negra. Purgando.")
+                    
+                    // 1. Limpieza en Disco
+                    musicDataStore.clearActiveSession()
+                    
+                    // 2. Limpieza en Memoria del Listener (v2.2)
+                    lastAppliedSnapshot = null
+                    lastLogicalSnapshot = null
+                    lastObservedSnapshot = null
+                    inFlightSnapshot = null
+                    savedArtworkKey = null
+                    savedAppIconKey = null
+                    
+                    // 3. Sincronía Atómica: El observador startRamMirror actualizará la memoria (Fast-Track)
+                    
+                    // 4. Forzar actualización de Glance
+                    uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+                    
+                    // 5. Intento de relevo
+                    refreshBestSession(reason = "blacklist_handover")
+                }
+            }
+        }
+    }
+
+
+    private suspend fun processHistoryEvent(snapshot: MediaSnapshot) {
+        try {
+            val historyDir = File(filesDir, "history")
+            if (!historyDir.exists()) historyDir.mkdirs()
+
+            val artworkFile = File(historyDir, "art_${snapshot.trackKey.hashCode()}.webp")
+
+            // 1. Si la imagen NO existe, la resolvemos y guardamos
+            if (!artworkFile.exists()) {
+                val bitmap = when (val source = snapshot.artworkSource) {
+                    is ArtworkSource.Bitmap -> source.bitmap
+                    is ArtworkSource.Uri -> decodeAlbumArtUri(source.uri)
+                    ArtworkSource.Placeholder -> null
+                }
+
+                val finalBitmap = bitmap ?: getPlaceholderBitmap()
+
+                val density = applicationContext.resources.displayMetrics.density
+                val w = (80 * density).toInt()
+                val h = (40 * density).toInt()
+                val historyPill = ImageUtils.createHorizontalPill(finalBitmap, w, h)
+
+                val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    Bitmap.CompressFormat.WEBP_LOSSY
+                } else {
+                    @Suppress("DEPRECATION")
+                    Bitmap.CompressFormat.WEBP
+                }
+
+                FileOutputStream(artworkFile).use { out ->
+                    historyPill.compress(format, 80, out)
+                }
+                historyPill.recycle()
+            }
+
+            // 2. Clasificación de 3 Bandas con Motor Maestro
+            val finalPos = calculateEffectiveProgress(snapshot)
+            val progressFactor = if (snapshot.durationMs > 0) {
+                finalPos.toFloat() / snapshot.durationMs.toFloat()
+            } else {
+                1.0f // Fallback: asumimos completa si no hay duración
+            }
+
+            var isSkipped = progressFactor < 0.4f
+            
+            // Hallazgo v3.8: Inmunidad Bendecida desde RAM (Claude)
+            val currentRAM = MusicStateProvider.current()
+            val isBlessed = currentRAM.history.any { it.trackKey == snapshot.trackKey && !it.isSkipped }
+            if (isBlessed && isSkipped) {
+                InternalLogger.log(applicationContext, "BLESSED: Anulando skip para canción favorita en RAM")
+                isSkipped = false
+            }
+
+            val isPartial = !isSkipped && progressFactor < 0.85f
+
+            val outcome = when {
+                isSkipped -> "SKIPPED"
+                isPartial -> "PARTIAL"
+                else -> "COMPLETED"
+            }
+
+            // BLOQUEO ESTRICTO: Descarta callbacks duplicados de la misma canción y resultado en ráfaga
+            if (snapshot.trackKey == lastProcessedTrack && outcome == lastProcessedOutcome) {
+                Log.d(TAG, "[DIAGNOSTIC] DEDUPLICATOR: Evento duplicado bloqueado para ${snapshot.title} ($outcome)")
+                return
+            }
+
+            lastProcessedTrack = snapshot.trackKey
+            lastProcessedOutcome = outcome
+
+            // Actualizar racha en DataStore y obtener el valor nuevo
+            val newStreak = musicDataStore.updateSkipStreak(
+                snapshot.title,
+                snapshot.artist,
+                isSkip = isSkipped,
+                isPartial = isPartial
+            )
+
+            // Actualizar analítica de repetición (Flama/Infinito)
+            val repeatAnalytics = musicDataStore.updateRepeatStats(
+                snapshot.title,
+                snapshot.artist,
+                isSkip = isSkipped
+            )
+
+            // Actualizar analítica de fidelidad del artista (Corazón ❤️)
+            // Solo si la canción fue completada (no es skip ni parcial)
+            if (!isSkipped && !isPartial) {
+                musicDataStore.updateArtistStats(snapshot.artist)
+            }
+
+            // 3. Commit al DataStore (La lógica de unicidad LRU e Inmunidad está en addToHistory)
+            val historyItem = HistoryItem(
+                title = snapshot.title,
+                artist = snapshot.artist,
+                packageName = snapshot.packageName,
+                artworkPath = artworkFile.absolutePath,
+                artworkKey = snapshot.artworkKey,
+                trackKey = snapshot.trackKey,
+                timestamp = snapshot.recordedAt,
+                isSkipped = isSkipped,
+                skipStreak = newStreak,
+                playsToday = repeatAnalytics.first,
+                streakDays = repeatAnalytics.second
+            )
+            
+            if (isSkipped) {
+                Log.d(TAG, "[DIAGNOSTIC] HISTORY: Guardando ${snapshot.title} con estatus SKIP (Progreso: ${(progressFactor*100).toInt()}%)")
+            }
+            
+            musicDataStore.addToHistory(historyItem)
+
+            // 3. Limpieza de archivos antiguos
+            cleanupHistoryFiles()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error procesando evento de historial para ${snapshot.title}", e)
+        }
+    }
+
+
+    private suspend fun cleanupHistoryFiles() {
+        try {
+            val historyDir = File(filesDir, "history")
+            if (!historyDir.exists()) return
+
+            val currentHistory = musicDataStore.musicInfoFlow.first().history
+            val validFiles = currentHistory.map { File(it.artworkPath).name }.toSet()
+
+            historyDir.listFiles()?.forEach { file ->
+                if (file.name.startsWith("art_") && !validFiles.contains(file.name)) {
+                    file.delete()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error limpiando archivos de historial", e)
+        }
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        Log.d(TAG, "[DIAGNOSTIC] PERMISSION_SYNC: Listener connected. Refreshing widget.")
+        
+        uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+
+        // Registro Dinámico del Receiver de Pantalla (API 33+ Compatible)
+        val screenFilter = android.content.IntentFilter().apply {
+            addAction(android.content.Intent.ACTION_SCREEN_ON)
+            addAction(android.content.Intent.ACTION_SCREEN_OFF)
+        }
+        ContextCompat.registerReceiver(this, dynamicScreenReceiver, screenFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         /*
-         * Al conectar, sincronizamos el estado del artwork guardado.
+         * Al conectar, sincronizamos el estado del artwork guardado y reconstruimos punteros.
          */
         serviceScope.launch {
             val keyFile = File(filesDir, ALBUM_ART_KEY_FILE)
@@ -309,11 +726,47 @@ class MusicNotificationListener : NotificationListenerService() {
                     savedAppIconKey = iconKeyFile.readText().trim().takeIf { it.isNotEmpty() }
                 }
             }
+
+            // REHIDRATACIÓN: Cargar el estado lógico desde el DataStore (El "Diario de la Verdad")
+            val currentInfo = musicDataStore.musicInfoFlow.first()
+            if (currentInfo.trackKey.isNotEmpty()) {
+                val recoveredSnapshot = MediaSnapshot(
+                    packageName = currentInfo.packageName,
+                    title = currentInfo.title,
+                    artist = currentInfo.artist,
+                    album = "",
+                    mediaId = "",
+                    artworkUri = currentInfo.artworkUri,
+                    playbackState = if (currentInfo.isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
+                    isSessionActive = currentInfo.isSessionActive,
+                    playbackDeviceName = currentInfo.playbackDeviceName,
+                    durationMs = currentInfo.durationMs,
+                    observedAtRealtime = SystemClock.elapsedRealtime()
+                )
+                lastLogicalSnapshot = recoveredSnapshot
+                lastAppliedSnapshot = recoveredSnapshot
+                lastCommittedInfo = currentInfo
+                
+                // INIT RAM (v2.8): Sincronizamos la memoria con el disco al arrancar
+                serviceScope.launch {
+                    MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo))
+                }
+                
+                Log.d(TAG, "[DIAGNOSTIC] Punteros de estado y RAM rehidratados desde DataStore.")
+            }
+
+            // VERIFICACIÓN DE ESTADO INICIAL: Refrescar si hay discrepancia inmediata
+            refreshBestSession(reason = "listener_reconnected")
             
-            // Publicar la previsualización real al inicio (Respetando el Rate Limit de Android 15)
+            // Sincronizamos la marca de tiempo para evitar rate-limit inmediato
+            lastPreviewUpdate = System.currentTimeMillis()
+            
             if (Build.VERSION.SDK_INT >= 35) {
                 try {
-                    GlanceAppWidgetManager(applicationContext).setWidgetPreviews(MusicWidgetReceiver::class)
+                    val manager = GlanceAppWidgetManager(applicationContext)
+                    manager.setWidgetPreviews(MusicWidgetFullReceiver::class)
+                    manager.setWidgetPreviews(MusicWidgetPillReceiver::class)
+                    manager.setWidgetPreviews(MusicWidgetControlReceiver::class)
                 } catch (e: Exception) {
                     Log.w(TAG, "No se pudo publicar la preview inicial", e)
                 }
@@ -343,17 +796,58 @@ class MusicNotificationListener : NotificationListenerService() {
         )
     }
 
-    /*
-     * La notificación multimedia actúa como disparador.
-     *
-     * MediaSession sigue siendo la fuente principal de metadata.
-     */
     override fun onNotificationPosted(
         sbn: StatusBarNotification
     ) {
 
         val notification =
             sbn.notification
+
+        // Lógica de Ascenso de Icono dirigida por eventos
+        serviceScope.launch {
+            val lastSnapshot = lastAppliedSnapshot
+            if (lastSnapshot != null && sbn.packageName == lastSnapshot.packageName && 
+                currentIconTier < TIER_NOTIFICATION && 
+                notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)) {
+                
+                val density = applicationContext.resources.displayMetrics.density
+                val targetSizePx = (14 * density).toInt()
+                
+                val iconFromNotif = notification.smallIcon?.loadDrawable(this@MusicNotificationListener)?.toBitmap()
+                if (iconFromNotif != null) {
+                    val normalized = Bitmap.createScaledBitmap(iconFromNotif, targetSizePx, targetSizePx, true)
+                    
+                    commitMutex.withLock {
+                        // Re-verificar tier dentro del lock para evitar carreras
+                        if (currentIconTier < TIER_NOTIFICATION) {
+                            saveBitmapToFile(normalized, APP_ICON_FILE)
+                            val iconKey = "${sbn.packageName}_stable"
+                            saveTextToFile(iconKey, APP_ICON_KEY_FILE)
+                            savedAppIconKey = iconKey
+                            currentIconTier = TIER_NOTIFICATION
+                            
+                            // Actualización atómica del DataStore para reflejar el cambio en la UI
+                            val currentInfo = musicDataStore.musicInfoFlow.first()
+                            if (currentInfo.packageName == sbn.packageName) {
+                                val updated = currentInfo.copy(appIconKey = iconKey)
+                                musicDataStore.saveMusicInfo(updated)
+                                
+                                // SYNC RAM (v4.0): Relevo Atómico de Icono (Identity Guard)
+                                val changed = MusicStateProvider.applyEvent(MusicUpdateEvent.ArtworkResolved(
+                                    trackKey = currentInfo.trackKey,
+                                    artworkKey = currentInfo.artworkKey,
+                                    iconKey = iconKey
+                                ))
+                                if (changed) {
+                                    uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+                                }
+                            }
+                            Log.d(TAG, "[DIAGNOSTIC] ICON_ASCENT: Icono ascendido a TIER_NOTIFICATION para ${sbn.packageName}")
+                        }
+                    }
+                }
+            }
+        }
 
         if (
             notification.category ==
@@ -428,6 +922,22 @@ class MusicNotificationListener : NotificationListenerService() {
                     override fun onPlaybackStateChanged(
                         state: PlaybackState?
                     ) {
+                        // REGLA 3: Intercepción del Seek (Optimizado con Debounce y Reloj Monotónico)
+                        if (state != null && state.state == PlaybackState.STATE_PLAYING) {
+                            val lastSnapshot = lastAppliedSnapshot
+                            if (lastSnapshot != null && lastSnapshot.packageName == controller.packageName) {
+                                val elapsed = SystemClock.elapsedRealtime() - lastSnapshot.observedAtRealtime
+                                val expectedPos = lastSnapshot.positionMs + (if (lastSnapshot.playbackState == PlaybackState.STATE_PLAYING) elapsed else 0L)
+                                val actualPos = state.position
+                                
+                                // Detectar cualquier salto significativo (> 800ms) solo en reproducción
+                                if (Math.abs(expectedPos - actualPos) > 800) {
+                                    val now = SystemClock.elapsedRealtime()
+                                    Log.d(TAG, "[LYRICS_TRACE] Seek detectado (${actualPos}ms). Agrupando ráfaga...")
+                                    seekEventFlow.tryEmit(Triple(lastSnapshot, actualPos, now))
+                                }
+                            }
+                        }
 
                         requestRefresh(
                             reason = "playback_state"
@@ -480,11 +990,6 @@ class MusicNotificationListener : NotificationListenerService() {
         )
     }
 
-    /*
-     * Punto único de entrada para las actualizaciones.
-     *
-     * Agrupa ráfagas de callbacks consecutivos.
-     */
     private fun requestRefresh(
         fast: Boolean = false,
         reason: String
@@ -522,14 +1027,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 } catch (
                     e: CancellationException
                 ) {
-
-                    /*
-                     * Cancelación esperada.
-                     *
-                     * No se registra como error.
-                     */
                     throw e
-
                 } catch (e: Exception) {
 
                     Log.e(
@@ -560,17 +1058,20 @@ class MusicNotificationListener : NotificationListenerService() {
         if (
             activeSessions.isEmpty()
         ) {
-            // No hay sesiones activas: Marcar como RECIENTE (History)
-            selectedController = null
-            
-            // Si teníamos una canción, la mantenemos pero desactivamos la sesión
-            lastAppliedSnapshot?.let { last ->
-                val snapshot = last.copy(
-                    playbackState = PlaybackState.STATE_NONE,
-                    isSessionActive = false
-                )
-                processSnapshot(null, null, snapshot, "no_active_sessions")
+            // Hallazgo v4.1: Cierre de Sesión Pasivo (Sin historial)
+            // Respetamos la regla: El historial solo se escribe en la transición a otra canción.
+            lastLogicalSnapshot?.let { last ->
+                serviceScope.launch {
+                    val finalPos = calculateEffectiveProgress(last)
+                    musicDataStore.clearActiveSession()
+                    
+                    // Notificamos a la RAM el fin de sesión atómico
+                    if (MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(finalPos))) {
+                        uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+                    }
+                }
             }
+            selectedController = null
             return
         }
 
@@ -591,11 +1092,8 @@ class MusicNotificationListener : NotificationListenerService() {
             )
                 ?: return
 
-        /*
-         * Si ya observamos exactamente este snapshot,
-         * no iniciamos otro procesamiento.
-         */
         if (
+            reason != "catch_up_render" &&
             snapshot.contentKey ==
             lastObservedSnapshot
                 ?.contentKey
@@ -604,18 +1102,8 @@ class MusicNotificationListener : NotificationListenerService() {
             return
         }
 
-        /*
-         * Registramos inmediatamente el snapshot observado.
-         *
-         * No esperamos a que termine la descarga.
-         */
-        // lastObservedSnapshot = snapshot // MOVIDO A COMMIT_ZONE PARA EVITAR SNAPSHOTS HUÉRFANOS
-
-        /*
-         * Si exactamente este snapshot está actualmente
-         * en proceso, no lo duplicamos.
-         */
         if (
+            reason != "catch_up_render" &&
             snapshot.contentKey ==
             inFlightSnapshot
                 ?.contentKey
@@ -624,10 +1112,8 @@ class MusicNotificationListener : NotificationListenerService() {
             return
         }
 
-        /*
-         * Si ya está aplicado, no hay nada que hacer.
-         */
         if (
+            reason != "catch_up_render" &&
             snapshot.contentKey ==
             lastAppliedSnapshot
                 ?.contentKey
@@ -641,7 +1127,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 controller,
             metadata =
                 metadata,
-            snapshot =
+            rawSnapshot =
                 snapshot,
             reason =
                 reason
@@ -653,9 +1139,6 @@ class MusicNotificationListener : NotificationListenerService() {
         List<MediaController>
     ): MediaController? {
 
-        /*
-         * 1. Mantener el controller actual si sigue reproduciendo.
-         */
         selectedController
             ?.let { current ->
 
@@ -682,10 +1165,6 @@ class MusicNotificationListener : NotificationListenerService() {
                 }
             }
 
-        /*
-         * 2. Si solo hay una sesión reproduciendo,
-         * elegirla.
-         */
         val playingSessions =
             activeSessions.filter {
 
@@ -703,10 +1182,6 @@ class MusicNotificationListener : NotificationListenerService() {
             return selectedController
         }
 
-        /*
-         * 3. Si hay varias sesiones reproduciendo,
-         * conservar la actual si todavía existe.
-         */
         selectedController
             ?.let { current ->
 
@@ -725,9 +1200,6 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
             }
 
-        /*
-         * 4. Fallback.
-         */
         val fallback =
             playingSessions
                 .firstOrNull()
@@ -800,6 +1272,10 @@ class MusicNotificationListener : NotificationListenerService() {
 
         val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
         val position = controller.playbackState?.position ?: 0L
+        
+        // REGLA: Usamos el caché para evitar sondeos en cada track change
+        val deviceName = cachedAudioDeviceName
+        val deviceType = cachedAudioDeviceType
 
         return MediaSnapshot(
             packageName = controller.packageName,
@@ -810,18 +1286,129 @@ class MusicNotificationListener : NotificationListenerService() {
             artworkUri = artworkUri,
             playbackState = playbackState,
             isSessionActive = true,
+            playbackDeviceName = deviceName,
+            playbackDeviceType = deviceType,
             durationMs = duration,
             positionMs = position,
-            recordedAt = System.currentTimeMillis()
+            recordedAt = System.currentTimeMillis(),
+            artworkSource = ArtworkSource.Placeholder,
+            maxPositionMs = position,
+            observedAtRealtime = SystemClock.elapsedRealtime()
         )
+    }
+
+    private fun calculateEffectiveProgress(snapshot: MediaSnapshot): Long {
+        if (snapshot.playbackState != PlaybackState.STATE_PLAYING) {
+            return snapshot.maxPositionMs
+        }
+        val now = SystemClock.elapsedRealtime()
+        val elapsedSinceObservation = now - snapshot.observedAtRealtime
+        val estimatedPos = snapshot.positionMs + elapsedSinceObservation
+        
+        // Hallazgo v3.8: Watermark (maxPositionMs) para evitar retrocesos accidentales
+        val progress = Math.max(snapshot.maxPositionMs, estimatedPos)
+
+        return if (snapshot.durationMs > 0) {
+            Math.min(progress, snapshot.durationMs)
+        } else {
+            progress
+        }
+    }
+
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        super.onNotificationRemoved(sbn)
+        val pkg = sbn?.packageName ?: return
+        
+        if (pkg == lastObservedSnapshot?.packageName) {
+            Log.d(TAG, "[REACTIVE] Notificación removida para $pkg. Sincronizando sesión.")
+            serviceScope.launch {
+                refreshBestSession(reason = "notification_removed")
+            }
+        }
+    }
+
+    private fun getPlaybackDeviceInfo(context: Context): Pair<String, Int> {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+
+        // 1. Prioridad: Bluetooth (A2DP, LE, SCO)
+        val bluetooth = devices.find { 
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || 
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && it.type == AudioDeviceInfo.TYPE_BLE_HEADSET) ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER)
+        }
+        if (bluetooth != null) {
+            val name = bluetooth.productName?.toString()
+            return (name?.takeIf { it.isNotBlank() } ?: "Bluetooth") to bluetooth.type
+        }
+
+        // 2. Prioridad: Auriculares con cable o USB
+        val wired = devices.find { 
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET || 
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+            it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+            it.type == AudioDeviceInfo.TYPE_USB_DEVICE
+        }
+        if (wired != null) return "Auriculares" to wired.type
+
+        // 3. Prioridad: Salidas externas (HDMI, TV, Dock)
+        val external = devices.find {
+            it.type == AudioDeviceInfo.TYPE_HDMI ||
+            it.type == AudioDeviceInfo.TYPE_HDMI_ARC ||
+            it.type == AudioDeviceInfo.TYPE_DOCK
+        }
+        if (external != null) return "Salida externa" to external.type
+
+        // 4. Fallback: Altavoz del teléfono
+        return "Altavoz del teléfono" to AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+    }
+
+    private fun isAppAllowed(packageName: String): Boolean {
+        // 0. Apps prohibidas explícitamente (Blacklist interna)
+        val restrictedPackages = setOf(
+            "org.kde.kdeconnect", "com.google.android.projection.gearhead", 
+            "com.android.systemui", "com.google.android.apps.maps"
+        )
+        if (restrictedPackages.contains(packageName)) return false
+
+        // 1. Apps conocidas que siempre permitimos (Fallback robusto)
+        val commonMusicPackages = setOf(
+            "com.spotify.music", "com.google.android.apps.youtube.music",
+            "com.apple.android.music", "com.amazon.mp3", "com.soundcloud.android",
+            "org.videolan.vlc", "com.mxtech.videoplayer.ad", "com.deezer.android",
+            "com.tidal.android", "com.pandora.android", "com.musicolet", "com.hiby.music"
+        )
+        if (commonMusicPackages.contains(packageName)) return true
+
+        return try {
+            val pm = packageManager
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            
+            // 2. Por categoría de sistema (Android 8.0+)
+            val isMediaCategory = appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_AUDIO ||
+                    appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_VIDEO
+            if (isMediaCategory) return true
+
+            // 3. Por servicios multimedia declarados
+            val mediaIntent = android.content.Intent("android.media.browse.MediaBrowserService")
+            val mediaApps = pm.queryIntentServices(mediaIntent, 0).map { it.serviceInfo.packageName }
+            if (mediaApps.contains(packageName)) return true
+
+            false
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private suspend fun processSnapshot(
         controller: MediaController?,
         metadata: MediaMetadata?,
-        snapshot: MediaSnapshot,
+        rawSnapshot: MediaSnapshot,
         reason: String
     ) {
+        // --- STAGE 1: RESOLUCIÓN DE ESTADO (EJECUCIÓN SIEMPRE ACTIVA) ---
 
         /*
          * Creamos una nueva generación de forma atómica.
@@ -829,166 +1416,171 @@ class MusicNotificationListener : NotificationListenerService() {
         val myGeneration =
             generation.incrementAndGet()
 
-        val previousSnapshot =
-            lastAppliedSnapshot
+        // REGLA: Usamos lastLogicalSnapshot para la deduplicación de negocio
+        // Esto permite que el historial detecte cambios aunque la pantalla esté apagada.
+        val previousLogical =
+            lastLogicalSnapshot
 
-        val trackChanged =
-            previousSnapshot
-                ?.trackKey !=
-                    snapshot.trackKey
+        val sessionChanged = previousLogical?.sessionIdentity != rawSnapshot.sessionIdentity
+        val trackContentChanged = previousLogical?.trackKey != rawSnapshot.trackKey
 
-        val artworkChanged =
-            previousSnapshot
-                ?.artworkKey !=
-                    snapshot.artworkKey
+        // Paso 2.2: GUARD CLAUSE (Evita procesar snapshots redundantes en Disco)
+        // REGLA VIP: Si vienes de un Catch-up, ignoramos la deduplicación para forzar el renderizado visual.
+        val isCatchUp = reason == "catch_up_render"
+        
+        // Detección de Incoherencia de Imagen: Si la portada en disco no coincide con la del snapshot, forzamos bypass
+        val artIncoherent = savedArtworkKey != rawSnapshot.artworkKey && isWidgetPotentiallyVisible()
 
-        Log.d(
-            TAG,
-            "[DIAGNOSTIC] processSnapshot START #$myGeneration | Track=${snapshot.title} | reason=$reason"
-        )
+        // Hallazgo 4.1: RAM-Fringe Deduplication (v3.1)
+        // Bloqueamos ráfagas antes de entrar al Mutex o realizar cálculos analíticos.
+        val currentMem = MusicStateProvider.current()
+        if (!isCatchUp && !trackContentChanged && !artIncoherent && 
+            currentMem.isPlaying == (rawSnapshot.playbackState == PlaybackState.STATE_PLAYING) && 
+            currentMem.isSessionActive == rawSnapshot.isSessionActive) {
+            
+            // Si el widget es visible pero el contenido es idéntico a la RAM, ignoramos.
+            lastObservedSnapshot = rawSnapshot
+            return
+        }
 
-        /*
-         * Marcamos como in-flight.
-         */
-        inFlightSnapshot =
-            snapshot
+        if (isCatchUp || artIncoherent) {
+            InternalLogger.log(applicationContext, "BYPASS: Forzando actualización (Catch-up=$isCatchUp, ArtIncoherent=$artIncoherent)")
+        }
 
-        try {
-
-            /*
-             * 1. Resolución de recursos visuales (Fase Cancelable).
-             * No tocamos el DataStore ni el disco todavía.
-             */
-            var resolvedArtwork: Bitmap? = null
-            var resolvedAppIcon: Bitmap? = null
-            var resolvedIconKey: String? = null
-
-            if (controller != null && metadata != null && 
-                (trackChanged || artworkChanged || savedArtworkKey == null)) {
-                
-                // A. Portada
-                resolvedArtwork = kotlinx.coroutines.withTimeoutOrNull(ARTWORK_TIMEOUT_MS) {
-                    resolveArtworkDeduplicated(
-                        controller = controller,
-                        metadata = metadata,
-                        artworkKey = snapshot.artworkKey,
-                        generation = myGeneration
-                    )
-                }
-
-                // B. Icono de app
-                resolvedAppIcon = resolveAppIcon(snapshot.packageName)
-                resolvedIconKey = resolvedAppIcon?.let { "${snapshot.packageName}_${System.currentTimeMillis()}" }
-
-                // D. Letras (LRCLIB)
-                if (trackChanged) {
-                    lyricsUpdateJob?.cancel()
-                    lyricsFetchJob?.cancel()
-                    currentLyrics = null
-                    
-                    lyricsFetchJob = serviceScope.launch {
-                        val entries = fetchLyrics(snapshot.artist, snapshot.title, snapshot.durationMs / 1000)
-                        if (entries != null && isActive) {
-                            currentLyrics = LyricsResult(snapshot.trackKey, entries)
-                            startLyricsShowcase(snapshot)
-                        }
-                    }
-                } else if (snapshot.playbackState == PlaybackState.STATE_PLAYING) {
-                    // DETECCIÓN DE SEEK (Salto de tiempo)
-                    val lastSnapshot = lastAppliedSnapshot
-                    if (lastSnapshot != null) {
-                        val elapsedSinceLast = System.currentTimeMillis() - lastSnapshot.recordedAt
-                        val expectedPos = lastSnapshot.positionMs + elapsedSinceLast
-                        val actualPos = snapshot.positionMs
-                        
-                        if (Math.abs(expectedPos - actualPos) > 3000) {
-                            Log.d(TAG, "[LYRICS] Salto de tiempo detectado. Resincronizando...")
-                            startLyricsShowcase(snapshot)
-                        } else if (lyricsUpdateJob?.isActive != true) {
-                            startLyricsShowcase(snapshot)
-                        }
-                    } else if (lyricsUpdateJob?.isActive != true) {
-                        startLyricsShowcase(snapshot)
-                    }
-                } else if (snapshot.isSessionActive) {
-                    // ESTADO PAUSADO: Iniciamos ciclo de alternancia lenta
-                    if (lyricsUpdateJob?.isActive != true) {
-                        startPausedLyricsCycle(snapshot)
-                    }
-                } else {
-                    // SESIÓN DESTRUIDA: Limpieza absoluta
-                    lyricsUpdateJob?.cancel()
-                    lyricsUpdateJob = null
-                    currentLyrics = null
-                }
+        val appChanged = previousLogical?.packageName != rawSnapshot.packageName
+        
+        if (appChanged) {
+            currentIconTier = TIER_NONE
+            // REGLA: Limpieza de Iconos (Icon Fix) ante cambios de app
+            saveTextToFile("", APP_ICON_KEY_FILE)
+            savedAppIconKey = null
+            
+            // Hallazgo v3.4: Limpieza preventiva de RAM en transición
+            serviceScope.launch {
+                MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(0L)) // Simulamos fin de sesión
             }
+        }
 
-            /*
-             * Punto de Control de Generación (Filtro Temprano):
-             * Si llegó un snapshot más nuevo mientras suspendíamos, salimos.
-             */
-            val isStillRelevant = snapshot.artworkKey == lastObservedSnapshot?.artworkKey
-            if (myGeneration != generation.get() && !isStillRelevant) {
-                Log.d(TAG, "[DIAGNOSTIC] ABORT_EARLY: #$myGeneration is obsolete (current gen: ${generation.get()})")
+        // REGLA DE PROMOCIÓN DE SESIÓN (Persistent Snapshot)
+        if (sessionChanged && previousLogical != null && rawSnapshot.packageName != previousLogical.packageName) {
+            val isNewSessionWeak = rawSnapshot.playbackState != PlaybackState.STATE_PLAYING
+            if (isNewSessionWeak) {
+                Log.d(TAG, "[DIAGNOSTIC] IGNORED: Ignorando sesión débil de ${rawSnapshot.packageName}")
                 return
             }
+        }
 
-            /*
-             * 2. ACTUALIZACIÓN ATÓMICA (Fase No Cancelable / Zona de Commit).
-             * Aquí realizamos las operaciones irreversibles en disco y DataStore.
-             * Usamos commitMutex para evitar colisiones entre múltiples ejecuciones.
-             */
-            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
-                commitMutex.withLock {
+        // FILTRO DE IDENTIDAD (Allow-list)
+        if (!isAppAllowed(rawSnapshot.packageName)) return
 
-                    /*
-                     * Punto de Control de Generación (Filtro Crítico dentro de Lock):
-                     * Verificamos de nuevo tras adquirir el mutex por si llegó algo nuevo.
-                     */
-                    val isStillRelevantInLock = snapshot.artworkKey == lastObservedSnapshot?.artworkKey
-                    if (myGeneration != generation.get() && !isStillRelevantInLock) {
-                        Log.d(TAG, "[DIAGNOSTIC] ABORT_IN_LOCK: #$myGeneration is obsolete (current gen: ${generation.get()})")
-                        return@withLock
-                    }
+        val currentBlacklist = musicDataStore.musicInfoFlow.first().blacklist
+        if (currentBlacklist.contains(rawSnapshot.packageName)) return
 
-                    // A. Persistencia en Disco (Solo si hubo cambios o es necesario)
-                    if (controller != null && metadata != null && 
-                        (trackChanged || artworkChanged || savedArtworkKey == null)) {
-                        
-                        if (resolvedArtwork != null) {
-                            saveBitmapToFile(resolvedArtwork, ALBUM_ART_FILE)
-                            saveTextToFile(snapshot.artworkKey, ALBUM_ART_KEY_FILE)
-                            savedArtworkKey = snapshot.artworkKey
-                        } else if (trackChanged || artworkChanged) {
-                            // Solo usamos el placeholder si estamos seguros de que no hay arte para esta pista
-                            saveBitmapToFile(getPlaceholderBitmap(), ALBUM_ART_FILE)
-                            saveTextToFile("", ALBUM_ART_KEY_FILE)
-                            savedArtworkKey = null
-                        }
+        val isMetadataRefinement = previousLogical != null &&
+                previousLogical.title == rawSnapshot.title &&
+                previousLogical.artist == rawSnapshot.artist &&
+                previousLogical.packageName == rawSnapshot.packageName
 
-                        if (resolvedAppIcon != null && resolvedIconKey != null) {
-                            saveBitmapToFile(resolvedAppIcon, APP_ICON_FILE)
-                            saveTextToFile(resolvedIconKey, APP_ICON_KEY_FILE)
-                            savedAppIconKey = resolvedIconKey
-                        } else if (trackChanged) {
-                            // Blindaje: Si el track cambia y no hay icono nuevo, limpiamos el anterior
-                            // para evitar mostrar el icono de la app anterior (Efecto "Un solo cuerpo")
-                            saveTextToFile("", APP_ICON_KEY_FILE)
-                            savedAppIconKey = null
-                        }
-                    }
+        val isSameSession = previousLogical?.sessionIdentity == rawSnapshot.sessionIdentity
+        
+        val firstObservedAt = if (isSameSession) {
+            previousLogical?.firstObservedAt ?: rawSnapshot.recordedAt
+        } else {
+            rawSnapshot.recordedAt
+        }
 
-                // B. Guardado en DataStore (Estado completo y final)
+        val snapshot = rawSnapshot.copy(
+            firstObservedAt = firstObservedAt,
+            // Hallazgo v4.2: Propagación de Watermark y Assets en el Relay
+            maxPositionMs = Math.max(previousLogical?.maxPositionMs ?: 0L, rawSnapshot.positionMs),
+            artworkSource = previousLogical?.artworkSource ?: rawSnapshot.artworkSource
+        )
+
+        // STAGE 1: DISPARADOR DE HISTORIAL (Solo en transición real)
+        if (sessionChanged && !isMetadataRefinement && previousLogical != null && previousLogical.title.isNotEmpty()) {
+            val finalEstimatedPos = calculateEffectiveProgress(previousLogical)
+            
+            val durationObserved = System.currentTimeMillis() - previousLogical.firstObservedAt
+
+            if (durationObserved > 5000L || finalEstimatedPos >= 5000L) {
+                val historySnapshot = previousLogical.copy(
+                    maxPositionMs = finalEstimatedPos,
+                    recordedAt = System.currentTimeMillis()
+                )
+                InternalLogger.log(applicationContext, "HISTORY: Guardando en historial: ${previousLogical.title}")
+                historyChannel.trySend(historySnapshot)
+            }
+        }
+
+        // ACTUALIZACIÓN DEL DIARIO LÓGICO
+        lastLogicalSnapshot = snapshot
+
+        // FAST-TRACK SSOT (v4.0 - Relevo Atómico de RAM)
+        serviceScope.launch {
+            val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
+            val currentInfo = musicDataStore.musicInfoFlow.first()
+            
+            // Hallazgo v3.7: Inmunidad de Salida.
+            val (plays, skip, freq) = when {
+                sessionChanged -> Triple(0, 0, false)
+                !isPlaying -> Triple(currentMem.playsToday, currentMem.skipStreak, currentMem.isFrequentArtist)
+                else -> musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
+            }
+            
+            val memInfo = MusicInfo(
+                title = snapshot.title,
+                artist = snapshot.artist,
+                packageName = snapshot.packageName,
+                trackKey = snapshot.trackKey,
+                artworkKey = currentInfo.artworkKey,
+                artworkUri = snapshot.artworkUri ?: currentInfo.artworkUri,
+                appIconKey = currentInfo.appIconKey,
+                isPlaying = isPlaying,
+                isSessionActive = snapshot.isSessionActive,
+                currentLyric = if (!sessionChanged) currentMem.currentLyric else "",
+                lyricsTrackKey = if (!sessionChanged) currentMem.lyricsTrackKey else "",
+                playbackDeviceName = snapshot.playbackDeviceName,
+                playbackDeviceType = snapshot.playbackDeviceType,
+                durationMs = snapshot.durationMs,
+                history = currentInfo.history,
+                playsToday = plays,
+                skipStreak = skip,
+                isFrequentArtist = freq,
+                lastUpdate = currentMem.lastUpdate // Se mantiene por el Reconciliador v4.0
+            )
+            
+            val event = if (sessionChanged) {
+                MusicUpdateEvent.NewSession(memInfo)
+            } else if (trackContentChanged) {
+                MusicUpdateEvent.MetadataRefinement(snapshot.trackKey, snapshot.artworkKey, snapshot.durationMs)
+            } else {
+                MusicUpdateEvent.StatusUpdate(isPlaying, snapshot.playbackDeviceName, snapshot.playbackDeviceType)
+            }
+
+            if (MusicStateProvider.applyEvent(event)) {
+                val glanceEvent = if (sessionChanged) UpdateEvent.IdentityChange(snapshot.trackKey) else UpdateEvent.StatusUpdate
+                uiUpdateFlow.tryEmit(glanceEvent)
+            }
+            
+            if (sessionChanged) {
+                relaunchLyricsTicker("identity_change")
+            } else {
+                val stateChangedUI = currentMem.isPlaying != isPlaying
+                if (stateChangedUI) relaunchLyricsTicker("state_sync")
+            }
+        }
+        // Solo guardamos de forma anticipada si el widget NO es visible (gating activo).
+        // Si es visible, dejamos que el Stage 2 maneje la persistencia final para evitar race conditions.
+        if (!isWidgetPotentiallyVisible()) {
+            serviceScope.launch {
                 val currentInfo = musicDataStore.musicInfoFlow.first()
                 val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
-                
-                // Conservamos la letra si la sesión sigue activa (aunque esté pausada)
                 val canKeepLyric = snapshot.isSessionActive && snapshot.trackKey == currentInfo.lyricsTrackKey
                 
                 val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
                 val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
 
-                val finalMusicInfo = MusicInfo(
+                val logicalMusicInfo = MusicInfo(
                     title = snapshot.title,
                     artist = snapshot.artist,
                     packageName = snapshot.packageName,
@@ -999,51 +1591,273 @@ class MusicNotificationListener : NotificationListenerService() {
                     isPlaying = isPlaying,
                     isSessionActive = snapshot.isSessionActive,
                     currentLyric = finalLyric,
-                    lyricsTrackKey = finalLyricKey
+                    lyricsTrackKey = finalLyricKey,
+                    playbackDeviceName = snapshot.playbackDeviceName,
+                    playbackDeviceType = snapshot.playbackDeviceType,
+                    durationMs = snapshot.durationMs
                 )
+                val changed = musicDataStore.saveMusicInfo(logicalMusicInfo, forceUpdate = false)
+                if (changed) {
+                    lastCommittedInfo = logicalMusicInfo
+                }
+            }
+        }
 
-                musicDataStore.saveMusicInfo(finalMusicInfo, forceUpdate = true)
+        // --- STAGE 2: PRESENTACIÓN (BLOQUEO POR COMPUERTA) ---
 
-                /*
-                 * Notificación única al widget con todos los recursos listos.
-                 */
-                Log.d(TAG, "[DIAGNOSTIC] COMMIT_ZONE: #${myGeneration} | Track=${snapshot.title} | ArtSync=${resolvedArtwork != null} | IconSync=${resolvedAppIcon != null}")
+        if (!isWidgetPotentiallyVisible()) {
+            Log.d(TAG, "[GATING] Presentación suprimida (Pantalla apagada/bloqueada).")
+            InternalLogger.log(applicationContext, "STAGE 2: Suprimido (Pantalla bloqueada). Track=${snapshot.title}")
+            isPresentationDirty = true
+            pendingSnapshot = snapshot
+            
+            // Destrucción de Ticker de Letras para ahorro de batería
+            lyricsUpdateJob?.cancel()
+            
+            // Abortamos Stage 2 para evitar I/O y CPU innecesarios
+            lastObservedSnapshot = snapshot
+            return
+        }
 
-                // --- RESTAURACIÓN DE PREVIEW OFICIAL GLANCE (Sincronización Viva Estable) ---
-                if (Build.VERSION.SDK_INT >= 35 && snapshot.playbackState == PlaybackState.STATE_PLAYING) {
-                    val now = System.currentTimeMillis()
-                    val titleChanged = snapshot.title != lastPreviewTitle
+        // Si el widget es visible, reseteamos flags de gating
+        isPresentationDirty = false
+        pendingSnapshot = null
+
+        val previousApplied = 
+            lastAppliedSnapshot
+
+        val trackChangedUI = 
+            previousApplied?.trackKey != snapshot.trackKey
+
+        val appChangedUI = 
+            previousApplied?.packageName != snapshot.packageName
+
+        val stateChangedUI = 
+            previousApplied?.playbackState != snapshot.playbackState
+
+        val artworkChangedUI =
+            previousApplied?.artworkKey != snapshot.artworkKey
+
+        Log.d(TAG, "[LYRICS_TRACE] processSnapshot START: Track=${snapshot.title} | Reason=$reason | Visible=true")
+
+        try {
+
+            // 1. Resolución de recursos visuales (Fase Cancelable).
+            var resolvedArtwork: Bitmap? = null
+            var resolvedAppIconFinal: Bitmap? = null
+            var resolvedIconKey: String? = null
+            var resolvedTierFinal: Int = TIER_NONE
+
+            // Hallazgo 1.1: Fail-safe Atomic Promotion (v3.1)
+            // Watchdog de 3.5s para no bloquear la UI si la red es lenta.
+            var artworkTimedOut = false
+
+            if (controller != null && metadata != null && 
+                (trackChangedUI || artworkChangedUI || savedArtworkKey == null)) {
+                
+                // A. Portada
+                resolvedArtwork = kotlinx.coroutines.withTimeoutOrNull(3500L) {
+                    resolveArtworkDeduplicated(
+                        controller = controller,
+                        metadata = metadata,
+                        artworkKey = snapshot.artworkKey,
+                        generation = myGeneration
+                    )
+                } ?: run {
+                    artworkTimedOut = true
+                    null
+                }
+
+                // B. Icono de app (Optimizado)
+                if (appChangedUI || savedAppIconKey == null || currentIconTier < TIER_NOTIFICATION) {
+                    val (icon, tier) = resolveAppIcon(snapshot.packageName)
                     
-                    // Publicamos respetando el Rate Limit de Android 15 (~2/hora)
-                    if (titleChanged && (now - lastPreviewUpdate > 20 * 60 * 1000L)) {
-                        lastPreviewUpdate = now
-                        lastPreviewTitle = snapshot.title
-                        serviceScope.launch {
-                            try {
-                                GlanceAppWidgetManager(applicationContext).setWidgetPreviews(MusicWidgetReceiver::class)
-                                Log.d(TAG, "[DIAGNOSTIC] PREVIEW_PUSH_SUCCESS: ${snapshot.title}")
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Fallo al publicar preview", e)
+                    // Solo actualizamos si el nuevo tier es mejor o igual al actual (o es un cambio de app)
+                    if (icon != null && (appChangedUI || tier > currentIconTier)) {
+                        resolvedAppIconFinal = icon
+                        resolvedIconKey = "${snapshot.packageName}_stable"
+                        resolvedTierFinal = tier
+                    }
+                }
+            }
+
+            // 1.5 GESTIÓN DE LETRAS (Independiente de la imagen para evitar desfases en pausa)
+            if (trackChangedUI) {
+                Log.d(TAG, "[LYRICS_TRACE] Cambio de track detectado. Reiniciando sesión.")
+                lyricsUpdateJob?.cancel()
+                lyricsFetchJob?.cancel()
+                currentLyrics = null
+                
+                lyricsFetchJob = serviceScope.launch {
+                    // PUNTO B: Debounce para evitar spam de API
+                    delay(500L)
+                    
+                    val result = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
+                    if (result != null && isActive) {
+                        currentLyrics = result
+                        relaunchLyricsTicker("identity_change")
+                    } else if (isActive) {
+                        // PUNTO E: Fallback Silencioso - Si falla la API, limpiamos el widget
+                        Log.d(TAG, "[LYRICS_TRACE] Fallback Silencioso: No se encontraron letras.")
+                        updateLyricInWidget(snapshot.trackKey, "")
+                    }
+                }
+            } else {
+                // Sincronización pasiva: Si no hay cambio de track, relanzamos solo si hay desvío o cambio de estado
+                if (currentLyrics == null) {
+                    currentLyrics = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
+                }
+
+                val effectivePos = previousApplied?.let { calculateEffectiveProgress(it) } ?: 0L
+                val drift = Math.abs(effectivePos - snapshot.positionMs)
+                
+                // Hard-Sync: Solo si el desvío es mayor a 1s o cambió el estado
+                val shouldResync = stateChangedUI || drift > 1500L || lyricsUpdateJob?.isActive != true
+
+                if (shouldResync && currentLyrics != null) {
+                    relaunchLyricsTicker("state_sync")
+                }
+            }
+
+            val isStillRelevant = snapshot.artworkKey == lastObservedSnapshot?.artworkKey
+            if (myGeneration != generation.get() && !isStillRelevant) {
+                Log.d(TAG, "[DIAGNOSTIC] ABORT_EARLY: #$myGeneration is obsolete (current gen: ${generation.get()})")
+                return
+            }
+
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                commitMutex.withLock {
+
+                    val isStillRelevantInLock = snapshot.artworkKey == lastObservedSnapshot?.artworkKey
+                    if (myGeneration != generation.get() && !isStillRelevantInLock) {
+                        Log.d(TAG, "[DIAGNOSTIC] ABORT_IN_LOCK: #$myGeneration is obsolete (current gen: ${generation.get()})")
+                        return@withLock
+                    }
+
+                    if (controller != null && metadata != null && 
+                        (trackChangedUI || artworkChangedUI || savedArtworkKey == null)) {
+                        
+                        if (resolvedArtwork != null) {
+                            // Hallazgo v3.9: Warm-up de RAM (Zero-Lag)
+                            // Inyectamos el bitmap en la caché compartida para que Glance lo lea a 0ms.
+                            val cacheKey = "${rawSnapshot.artworkKey}_raw"
+                            MusicWidget.bitmapCache.put(cacheKey, resolvedArtwork)
+
+                            // Paso 3.2: CACHING DE TRANSFORMACIÓN
+                            if (savedArtworkKey != snapshot.artworkKey) {
+                                // 1. Guardar versión RAW
+                                saveBitmapToFile(resolvedArtwork, ALBUM_ART_RAW_FILE, applyPillTransform = false)
+                                
+                                // 2. Guardar versión WIDGET (Píldora)
+                                saveBitmapToFile(resolvedArtwork, ALBUM_ART_FILE, applyPillTransform = true)
+                                
+                                saveTextToFile(snapshot.artworkKey, ALBUM_ART_KEY_FILE)
+                                savedArtworkKey = snapshot.artworkKey
+
+                                // Hallazgo v4.2: Artwork Relay (Inyección de Píxeles)
+                                // Inyectamos el bitmap en el snapshot lógico para que la próxima 
+                                // transición de historial lo lleve ya resuelto.
+                                lastLogicalSnapshot = lastLogicalSnapshot?.copy(
+                                    artworkSource = ArtworkSource.Bitmap(resolvedArtwork)
+                                )
+                            }
+                        } else if (trackChangedUI || artworkChangedUI) {
+                            // Solo usamos el placeholder si estamos seguros de que no hay arte para esta pista
+                            val placeholder = getPlaceholderBitmap()
+                            saveBitmapToFile(placeholder, ALBUM_ART_RAW_FILE, applyPillTransform = false)
+                            saveBitmapToFile(placeholder, ALBUM_ART_FILE, applyPillTransform = true)
+                            saveTextToFile("", ALBUM_ART_KEY_FILE)
+                            savedArtworkKey = null
+                        }
+
+                        if (resolvedAppIconFinal != null && resolvedIconKey != null) {
+                            saveBitmapToFile(resolvedAppIconFinal, APP_ICON_FILE)
+                            saveTextToFile(resolvedIconKey, APP_ICON_KEY_FILE)
+                            savedAppIconKey = resolvedIconKey
+                            currentIconTier = resolvedTierFinal
+                        } else if (appChangedUI) {
+                            // FIX: Solo borramos la llave si la APP cambió y no tenemos nuevo icono.
+                            // Esto evita la alternancia visual (flicker) al cambiar de track en la misma app.
+                            saveTextToFile("", APP_ICON_KEY_FILE)
+                            savedAppIconKey = null
+                            currentIconTier = TIER_NONE
+                        }
+                    }
+
+                    val currentInfo = musicDataStore.musicInfoFlow.first()
+                    val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
+                    val canKeepLyric = snapshot.isSessionActive && snapshot.trackKey == currentInfo.lyricsTrackKey
+                    
+                    val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
+                    val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
+
+                    val (playsToday, skipStreak, isFrequent) = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
+
+                    val finalMusicInfo = MusicInfo(
+                        title = snapshot.title,
+                        artist = snapshot.artist,
+                        packageName = snapshot.packageName,
+                        trackKey = snapshot.trackKey,
+                        artworkKey = snapshot.artworkKey,
+                        artworkUri = snapshot.artworkUri ?: "",
+                        appIconKey = savedAppIconKey ?: "",
+                        isPlaying = isPlaying,
+                        isSessionActive = snapshot.isSessionActive,
+                        currentLyric = finalLyric,
+                        lyricsTrackKey = finalLyricKey,
+                        playbackDeviceName = snapshot.playbackDeviceName,
+                        playbackDeviceType = snapshot.playbackDeviceType,
+                        durationMs = snapshot.durationMs,
+                        history = currentInfo.history,
+                        playsToday = playsToday,
+                        skipStreak = skipStreak,
+                        isFrequentArtist = isFrequent
+                    )
+
+                    // 1. Sincronía Atómica: Disco -> RAM -> UI
+                    val changedDisco = musicDataStore.saveMusicInfo(finalMusicInfo, forceUpdate = isCatchUp || artIncoherent || artworkTimedOut)
+                    
+                    if (artworkTimedOut) {
+                        Log.w(TAG, "[ATOMIC] Artwork promotion TIMEOUT (3.5s). Forzando UI con placeholder.")
+                    }
+                    
+                    // Hallazgo v3.9: Warm-up de RAM ya inyectado en bitmapCache
+                    // REGLA DE ORO (v4.0): El Árbitro reconcilia el commit de disco
+                    val changedRAM = MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(finalMusicInfo))
+
+                    if (Build.VERSION.SDK_INT >= 35 && snapshot.playbackState == PlaybackState.STATE_PLAYING) {
+                        val now = System.currentTimeMillis()
+                        val titleChanged = snapshot.title != lastPreviewTitle
+                        if (titleChanged && (now - lastPreviewUpdate > 20 * 60 * 1000L)) {
+                            lastPreviewUpdate = now
+                            lastPreviewTitle = snapshot.title
+                            serviceScope.launch {
+                                try {
+                                    val manager = GlanceAppWidgetManager(applicationContext)
+                                    manager.setWidgetPreviews(MusicWidgetFullReceiver::class)
+                                    manager.setWidgetPreviews(MusicWidgetPillReceiver::class)
+                                    manager.setWidgetPreviews(MusicWidgetControlReceiver::class)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Fallo al publicar preview", e)
+                                }
                             }
                         }
                     }
-                }
 
-                MusicWidget().updateAll(applicationContext)
-
-                    /*
-                     * Marcamos como aplicado para el tracking interno.
-                     */
-                    lastAppliedSnapshot =
-                        snapshot
-
-                    /*
-                     * Actualizamos el último observado solo tras un commit exitoso.
-                     * Esto garantiza que si una actualización es cancelada antes del commit,
-                     * la siguiente no sea ignorada por error como un duplicado falso.
-                     */
+                    // PROMOCIÓN DE IDENTIDAD (v2.8): Ahora que el disco tiene la imagen y la llave,
+                    // sincronizamos la RAM al 100% para mostrar el nuevo artwork.
+                    
+                    if (changedDisco || sessionChanged || changedRAM) {
+                        if (sessionChanged) {
+                            uiUpdateFlow.tryEmit(UpdateEvent.IdentityChange(snapshot.trackKey))
+                        } else {
+                            uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+                        }
+                    }
+                    
+                    lastAppliedSnapshot = snapshot
                     lastObservedSnapshot = snapshot
-                    lastCommittedInfo = finalMusicInfo
+                    lastCommittedInfo = MusicStateProvider.current()
                 }
             }
 
@@ -1053,190 +1867,207 @@ class MusicNotificationListener : NotificationListenerService() {
         } catch (e: Exception) {
             Log.e(TAG, "Error en pipeline atómico #$myGeneration", e)
         } finally {
-
-            /*
-             * Solo limpiamos inFlight si sigue siendo
-             * este mismo snapshot.
-             */
-            if (
-                inFlightSnapshot
-                    ?.contentKey ==
-                snapshot.contentKey
-            ) {
-
-                inFlightSnapshot =
-                    null
+            if (inFlightSnapshot?.contentKey == snapshot.contentKey) {
+                inFlightSnapshot = null
             }
         }
     }
 
-    /*
-     * Resuelve artwork usando:
-     *
-     * 1. Cache de memoria.
-     * 2. Deferred compartido en artworkInFlight.
-     * 3. Descarga/resolución real.
-     *
-     * Varias solicitudes simultáneas de la misma portada
-     * comparten exactamente el mismo Deferred.
-     */
-    private fun startPausedLyricsCycle(snapshot: MediaSnapshot) {
+    private fun relaunchLyricsTicker(reason: String) {
+        if (!isWidgetPotentiallyVisible()) {
+            lyricsUpdateJob?.cancel()
+            return
+        }
+
+        val currentInfo = MusicStateProvider.current()
+        if (currentInfo.isEmpty || !currentInfo.isSessionActive) {
+            lyricsUpdateJob?.cancel()
+            return
+        }
+
+        Log.d(TAG, "[LYRICS_TRACE] relaunchLyricsTicker: Reason=$reason | Track=${currentInfo.title}")
         lyricsUpdateJob?.cancel()
-        val lyrics = currentLyrics ?: return
-
-        lyricsUpdateJob = serviceScope.launch {
-            // Buscamos la línea que quedó en el momento de la pausa
-            val pausedPos = snapshot.positionMs
-            val lastEntry = lyrics.entries.lastOrNull { it.timestampMs <= pausedPos }
-            if (lastEntry == null) return@launch
-
-            var showLyric = true
-            while (isActive) {
-                val current = musicDataStore.musicInfoFlow.first()
-                if (current.trackKey != snapshot.trackKey) break
-
-                musicDataStore.saveMusicInfo(
-                    info = current.copy(
-                        currentLyric = if (showLyric) lastEntry.text else "",
-                        lyricsTrackKey = snapshot.trackKey
-                    ),
-                    forceUpdate = false
-                )
-                MusicWidget().updateAll(applicationContext)
-
-                showLyric = !showLyric // Alternamos para el siguiente ciclo
-                delay(60000L) // Alternancia cada 60 segundos (Bajo consumo)
-            }
-        }
-    }
-
-    private fun normalizeForSearch(text: String): String {
-        return text.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "").trim()
-    }
-
-    private suspend fun fetchLyrics(artist: String, title: String, duration: Long): List<LyricsEntry>? = withContext(Dispatchers.IO) {
-        try {
-            // Normalización suave para mejorar la tasa de éxito (ej. quitar "(Remastered)")
-            val cleanArtist = URLEncoder.encode(normalizeForSearch(artist), "UTF-8")
-            val cleanTitle = URLEncoder.encode(normalizeForSearch(title), "UTF-8")
-            
-            val durationParam = if (duration > 0) "&duration=$duration" else ""
-            val urlString = "https://lrclib.net/api/get?artist_name=$cleanArtist&track_name=$cleanTitle$durationParam"
-            
-            val connection = java.net.URL(urlString).openConnection() as java.net.HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            connection.setRequestProperty("User-Agent", "MusicWidgetAndroidApp (https://github.com/arenliel/musicwidget)")
-            
-            if (connection.responseCode == 200) {
-                val response = connection.inputStream.bufferedReader().use { it.readText() }
-                val json = JSONObject(response)
-                val lrc = json.optString("syncedLyrics")
-                if (lrc.isNotBlank()) return@withContext parseLrc(lrc)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "[LYRICS] Error en petición", e)
-        }
-        null
-    }
-
-    private fun parseLrc(lrc: String): List<LyricsEntry> {
-        val entries = mutableListOf<LyricsEntry>()
-        val lines = lrc.split("\n")
-        val regex = Regex("\\[(\\d{2}):(\\d{2})\\.(\\d{2,3})\\](.*)")
         
-        for (line in lines) {
-            val match = regex.find(line)
-            if (match != null) {
-                val min = match.groupValues[1].toLong()
-                val sec = match.groupValues[2].toLong()
-                val msPart = match.groupValues[3]
-                val ms = if (msPart.length == 2) msPart.toLong() * 10 else msPart.toLong()
-                val totalMs = (min * 60 + sec) * 1000 + ms
-                val text = match.groupValues[4].trim()
-                if (text.isNotBlank()) entries.add(LyricsEntry(totalMs, text))
+        // Hallazgo v3.8: Ticker Stateless (Claude). Lee identidad y estado directo de la RAM.
+        lyricsUpdateJob = serviceScope.launch(Dispatchers.IO) {
+            val lyricsRes = lyricsRepository.getLyrics(
+                currentInfo.trackKey, 
+                currentInfo.artist, 
+                currentInfo.title, 
+                currentInfo.durationMs
+            ) ?: return@launch
+
+            if (currentInfo.isPlaying) {
+                runLyricsShowcase(currentInfo.trackKey, lyricsRes)
+            } else {
+                runPausedLyricsCycle(currentInfo.trackKey, lyricsRes)
             }
         }
-        return entries
     }
 
-    private fun startLyricsShowcase(snapshot: MediaSnapshot) {
-        lyricsUpdateJob?.cancel()
-        val lyrics = currentLyrics ?: return
-        if (snapshot.playbackState != PlaybackState.STATE_PLAYING || snapshot.durationMs <= 0) return
+    private suspend fun runLyricsShowcase(myTrackKey: String, lyricsRes: LyricsResult) {
+        val snappinessOffset = 500L
 
-        lyricsUpdateJob = serviceScope.launch {
-            val duration = snapshot.durationMs
-            // Hitos de porcentaje
-            val milestones = listOf(0.05, 0.30, 0.60, 0.85)
-            val completedMilestones = mutableSetOf<Double>()
+        while (currentCoroutineContext().isActive) {
+            val currentRAM = MusicStateProvider.current()
+            // REGLA DE IDENTIDAD: Si la canción cambió o ya no suena, el motor se apaga.
+            if (currentRAM.trackKey != myTrackKey || !currentRAM.isPlaying) break
+            
+            // Usamos el Snapshot Lógico para el cálculo de posición real
+            val snapshot = lastLogicalSnapshot ?: break
+            val currentPos = calculateEffectiveProgress(snapshot)
+            
+            val entry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= (currentPos + snappinessOffset) }
+            
+            if (entry != null) {
+                updateLyricInWidget(myTrackKey, entry.text)
+            }
 
-            while (isActive) {
-                val currentPos = snapshot.positionMs + (System.currentTimeMillis() - snapshot.recordedAt)
-                val currentProgress = currentPos.toDouble() / duration
-
-                // Buscar hito de entrada
-                val currentMilestone = milestones.firstOrNull { 
-                    currentProgress >= it && !completedMilestones.contains(it) 
-                }
-
-                if (currentMilestone != null) {
-                    completedMilestones.add(currentMilestone)
-                    
-                    var linesShown = 0
-                    while (linesShown < 4 && isActive) {
-                        val pos = snapshot.positionMs + (System.currentTimeMillis() - snapshot.recordedAt)
-                        val entryIndex = lyrics.entries.indexOfLast { it.timestampMs <= pos }
-                        
-                        if (entryIndex != -1) {
-                            val entry = lyrics.entries[entryIndex]
-                            updateLyricInWidget(snapshot, entry.text)
-                            linesShown++
-                            
-                            val nextEntry = lyrics.entries.getOrNull(entryIndex + 1)
-                            val waitTime: Long = if (nextEntry != null) {
-                                (nextEntry.timestampMs - pos).coerceIn(2500L, 8000L)
-                            } else 5000L
-                            
-                            delay(waitTime)
-                        } else {
-                            delay(2000L)
-                        }
-                    }
-                    // Reset tras el bloque de 4 estrofas
-                    updateLyricInWidget(snapshot, "")
-                }
+            val next = lyricsRes.allEntries.firstOrNull { it.timestampMs > (currentPos + snappinessOffset) }
+            if (next != null) {
+                val waitTime = (next.timestampMs - (currentPos + snappinessOffset)).coerceAtLeast(100L)
                 
-                delay(10000L) // Comprobación de hito cada 10 seg
+                // Hallazgo v3.3: Silencios Inteligentes
+                if (waitTime > 15000L) {
+                    delay(8000L)
+                    if (currentCoroutineContext().isActive && MusicStateProvider.current().trackKey == myTrackKey) {
+                        updateLyricInWidget(myTrackKey, "")
+                    }
+                    delay((waitTime - 8000L).coerceAtLeast(100L))
+                } else {
+                    delay(waitTime)
+                }
+            } else {
+                break
             }
         }
     }
 
-    private suspend fun updateLyricInWidget(snapshot: MediaSnapshot, lyric: String) {
-        val current = musicDataStore.musicInfoFlow.first()
-        if (current.trackKey == snapshot.trackKey) {
-            musicDataStore.saveMusicInfo(
-                info = current.copy(currentLyric = lyric, lyricsTrackKey = snapshot.trackKey),
-                forceUpdate = false
-            )
-            MusicWidget().updateAll(applicationContext)
+    private suspend fun runPausedLyricsCycle(myTrackKey: String, lyricsRes: LyricsResult) {
+        var showLyric = true
+        while (currentCoroutineContext().isActive) {
+            val currentRAM = MusicStateProvider.current()
+            if (currentRAM.trackKey != myTrackKey || currentRAM.isPlaying) break
+            
+            val pausedPos = lastLogicalSnapshot?.positionMs ?: 0L
+            
+            var lastEntry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= pausedPos }
+            if (lastEntry == null && pausedPos < 5000L) {
+                lastEntry = lyricsRes.allEntries.firstOrNull()
+            }
+
+            val text = if (showLyric && lastEntry != null) lastEntry.text else ""
+            updateLyricInWidget(myTrackKey, text)
+            
+            showLyric = !showLyric
+            delay(60000L)
         }
     }
 
-    private fun resolveAppIcon(packageName: String): Bitmap? {
-        return try {
-            val notifications = getActiveNotifications()
-            // 1. Buscar notificación con EXTRA_MEDIA_SESSION (Prioridad máxima)
-            val mediaNotif = notifications.firstOrNull { 
-                it.packageName == packageName && it.notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION) 
-            } ?: notifications.firstOrNull { it.packageName == packageName }
-
-            mediaNotif?.notification?.smallIcon?.loadDrawable(this)?.toBitmap()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error resolviendo icono de app para $packageName", e)
-            null
+    private fun updateLyricInWidget(trackKey: String, lyric: String) {
+        // Relevo Atómico (v4.0)
+        serviceScope.launch {
+            if (MusicStateProvider.applyEvent(MusicUpdateEvent.LyricTick(lyric, trackKey))) {
+                uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+            }
         }
+    }
+
+    private fun resolveAppIcon(packageName: String): Pair<Bitmap?, Int> {
+        val density = applicationContext.resources.displayMetrics.density
+        val targetSizePx = (14 * density).toInt()
+
+        return try {
+            val existingInVault = iconVault[packageName]
+            
+            val notifications = getActiveNotifications()
+            val targetToken = selectedController?.sessionToken
+            
+            // PRIORIDAD 1: Icono de la Notificación (Referencia Maestra)
+            // 1.1 Match por Token
+            var mediaNotif = if (targetToken != null) {
+                notifications.firstOrNull { sbn ->
+                    val token = sbn.notification.extras.getParcelable<android.media.session.MediaSession.Token>(Notification.EXTRA_MEDIA_SESSION)
+                    token == targetToken
+                }
+            } else null
+
+            // 1.2 Fallback: Match por PackageName + MediaSession Extra
+            if (mediaNotif == null) {
+                mediaNotif = notifications.firstOrNull { 
+                    it.packageName == packageName && it.notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION) 
+                }
+            }
+
+            // 1.3 Fallback final: Match por PackageName
+            if (mediaNotif == null) {
+                mediaNotif = notifications.firstOrNull { it.packageName == packageName }
+            }
+
+            val iconFromNotif = mediaNotif?.notification?.smallIcon?.loadDrawable(this)?.toBitmap()
+            if (iconFromNotif != null) {
+                val normalized = Bitmap.createScaledBitmap(iconFromNotif, targetSizePx, targetSizePx, true)
+                iconVault[packageName] = normalized to TIER_NOTIFICATION
+                return normalized to TIER_NOTIFICATION
+            }
+
+            // PRIORIDAD 2: Rescate Monocromático
+            // Si ya tenemos un icono de Tier 2 en la bóveda, lo devolvemos para evitar re-procesar
+            if (existingInVault != null && existingInVault.second == TIER_MONOCHROME) {
+                return existingInVault
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val appIcon = packageManager.getApplicationIcon(packageName)
+                if (appIcon is android.graphics.drawable.AdaptiveIconDrawable) {
+                    val monochrome = appIcon.monochrome
+                    if (monochrome != null) {
+                        val rawMonochrome = getNativeAwareMonochromeBitmap(monochrome)
+                        val normalized = ImageUtils.normalizeIcon(rawMonochrome, isColorFallback = false, targetSizePx = targetSizePx)
+                        iconVault[packageName] = normalized to TIER_MONOCHROME
+                        return normalized to TIER_MONOCHROME
+                    }
+                }
+            }
+
+            // PRIORIDAD 3: Color Fallback (Normalizado y con Sharpening)
+            if (existingInVault != null && existingInVault.second == TIER_COLOR) {
+                return existingInVault
+            }
+
+            val colorIcon = packageManager.getApplicationIcon(packageName).toBitmap()
+            val normalized = ImageUtils.normalizeIcon(colorIcon, isColorFallback = true, targetSizePx = targetSizePx)
+            iconVault[packageName] = normalized to TIER_COLOR
+            return normalized to TIER_COLOR
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error en jerarquía de resolución de icono para $packageName", e)
+            iconVault[packageName] ?: (null to TIER_NONE)
+        }
+    }
+
+    /**
+     * Renderiza la capa monochrome respetando la resolución nativa para evitar pixelado.
+     */
+    private fun getNativeAwareMonochromeBitmap(drawable: android.graphics.drawable.Drawable): Bitmap {
+        val density = applicationContext.resources.displayMetrics.density
+        val standardSize = (108 * density).toInt()
+        
+        val intrinsicW = drawable.intrinsicWidth
+        val intrinsicH = drawable.intrinsicHeight
+        
+        // Si el recurso es ráster y pequeño, no forzamos el lienzo de 108dp para evitar "zoom borroso"
+        val renderSize = if (intrinsicW > 0 && intrinsicH > 0 && intrinsicW < standardSize) {
+            max(intrinsicW, intrinsicH)
+        } else {
+            standardSize
+        }
+
+        val bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        drawable.setBounds(0, 0, renderSize, renderSize)
+        drawable.draw(canvas)
+        return bitmap
     }
 
     private suspend fun resolveArtworkDeduplicated(
@@ -1245,195 +2076,54 @@ class MusicNotificationListener : NotificationListenerService() {
         artworkKey: String,
         generation: Long
     ): Bitmap? {
-
-        /*
-         * 1. Cache rápida.
-         */
-        artworkCache
-            .get(artworkKey)
-            ?.let { bitmap ->
-
-                Log.d(
-                    TAG,
-                    "Artwork cache hit: $artworkKey"
-                )
-
-                return bitmap
-            }
-
-        /*
-         * 2. Obtenemos o creamos un Deferred compartido.
-         */
-        val deferred =
-            getOrCreateArtworkDeferred(
-                controller =
-                    controller,
-                metadata =
-                    metadata,
-                artworkKey =
-                    artworkKey,
-                generation =
-                    generation
-            )
-
-        /*
-         * 3. Esperamos el resultado.
-         *
-         * Si otra actualización pidió la misma portada,
-         * ambas esperan este mismo Deferred.
-         */
+        artworkCache.get(artworkKey)?.let { bitmap ->
+            Log.d(TAG, "Artwork cache hit: $artworkKey")
+            return bitmap
+        }
+        val deferred = getOrCreateArtworkDeferred(controller, metadata, artworkKey, generation)
         return deferred.await()
     }
 
-    /*
-     * Obtiene un Deferred existente o crea uno nuevo.
-     *
-     * Esta función es el núcleo de la deduplicación de descargas.
-     */
     private suspend fun getOrCreateArtworkDeferred(
         controller: MediaController,
         metadata: MediaMetadata,
         artworkKey: String,
         generation: Long
     ): Deferred<Bitmap?> {
-
         artworkInFlightMutex.withLock {
-
-            /*
-             * Comprobamos de nuevo la cache dentro del lock.
-             */
-            artworkCache
-                .get(artworkKey)
-                ?.let { bitmap ->
-
-                    return CompletableDeferred(
-                        bitmap
-                    )
-                }
-
-            /*
-             * Si ya existe una operación para esta clave,
-             * reutilizamos exactamente el mismo Deferred.
-             */
-            artworkInFlight[
-                artworkKey
-            ]?.let { existing ->
-
-                if (
-                    existing.isActive
-                ) {
-
-                    Log.d(
-                        TAG,
-                        "Artwork ya está en vuelo; " +
-                                "reutilizando Deferred: " +
-                                artworkKey
-                    )
-
+            artworkCache.get(artworkKey)?.let { bitmap ->
+                return CompletableDeferred(bitmap)
+            }
+            artworkInFlight[artworkKey]?.let { existing ->
+                if (existing.isActive) {
+                    Log.d(TAG, "Artwork ya está en vuelo; reutilizando Deferred: $artworkKey")
                     return existing
                 }
-
-                /*
-                 * Si terminó pero no quedó eliminado,
-                 * limpiamos la entrada.
-                 */
-                artworkInFlight.remove(
-                    artworkKey
-                )
+                artworkInFlight.remove(artworkKey)
             }
-
-            /*
-             * Creamos UNA única operación.
-             *
-             * Se utiliza async sobre serviceScope para que el Deferred
-             * sea compartido por todos los consumidores.
-             */
-            val deferred =
-                serviceScope.async {
-
-                    try {
-
-                        val bitmap =
-                            findRealAlbumArt(
-                                controller =
-                                    controller,
-                                metadata =
-                                    metadata,
-                                artworkKey =
-                                    artworkKey
-                            )
-
-                        /*
-                         * Solo guardamos en cache si la operación
-                         * sigue siendo válida o si el artworkKey sigue siendo
-                         * el que la aplicación está observando.
-                         */
-                        val isStillRelevant = artworkKey == lastObservedSnapshot?.artworkKey
-
-                        if (
-                            isActive &&
-                            (generation ==
-                            this@MusicNotificationListener
-                                .generation.get() || isStillRelevant) &&
-                            bitmap != null
-                        ) {
-
-                            artworkCache.put(
-                                artworkKey,
-                                bitmap
-                            )
-                        }
-
-                        bitmap
-
-                    } catch (
-                        e: CancellationException
-                    ) {
-
-                        throw e
-
-                    } catch (e: Exception) {
-
-                        Log.e(
-                            TAG,
-                            "Error resolviendo artwork",
-                            e
-                        )
-
-                        null
-
-                    } finally {
-
-                        /*
-                         * Eliminamos la operación del mapa.
-                         *
-                         * Solo la eliminamos si sigue siendo
-                         * exactamente la misma instancia.
-                         */
-                        artworkInFlightMutex.withLock {
-
-                            val current =
-                                artworkInFlight[
-                                    artworkKey
-                                ]
-
-                            if (
-                                current ===
-                                coroutineContext[Job]
-                            ) {
-
-                                artworkInFlight.remove(
-                                    artworkKey
-                                )
-                            }
+            val deferred = serviceScope.async {
+                try {
+                    val bitmap = findRealAlbumArt(controller, metadata, artworkKey)
+                    val isStillRelevant = artworkKey == lastObservedSnapshot?.artworkKey
+                    if (isActive && (generation == this@MusicNotificationListener.generation.get() || isStillRelevant) && bitmap != null) {
+                        artworkCache.put(artworkKey, bitmap)
+                    }
+                    bitmap
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error resolviendo artwork", e)
+                    null
+                } finally {
+                    artworkInFlightMutex.withLock {
+                        val current = artworkInFlight[artworkKey]
+                        if (current === coroutineContext[Job]) {
+                            artworkInFlight.remove(artworkKey)
                         }
                     }
                 }
-
-            artworkInFlight[
-                artworkKey
-            ] = deferred
-
+            }
+            artworkInFlight[artworkKey] = deferred
             return deferred
         }
     }
@@ -1442,203 +2132,58 @@ class MusicNotificationListener : NotificationListenerService() {
         controller: MediaController,
         metadata: MediaMetadata,
         artworkKey: String
-    ): Bitmap? =
-        withContext(
-            Dispatchers.IO
-        ) {
-
-            val minArtDimension =
-                MIN_ART_DIMENSION
-
-            Log.d(
-                TAG,
-                "---- Resolviendo portada ----"
-            )
-
-            /*
-             * 1. ART bitmap directo.
-             */
-            metadata
-                .getBitmap(
-                    MediaMetadata.METADATA_KEY_ART
-                )
-                ?.let { bitmap ->
-
-                    if (
-                        isValidArtwork(
-                            bitmap,
-                            minArtDimension
-                        )
-                    ) {
-                        return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
-                    }
-                }
-
-            /*
-             * 2. ALBUM_ART bitmap directo.
-             */
-            metadata
-                .getBitmap(
-                    MediaMetadata.METADATA_KEY_ALBUM_ART
-                )
-                ?.let { bitmap ->
-
-                    if (
-                        isValidArtwork(
-                            bitmap,
-                            minArtDimension
-                        )
-                    ) {
-                        return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
-                    }
-                }
-
-            /*
-             * 3. DISPLAY_ICON bitmap directo (Refuerzo de Claude).
-             */
-            metadata
-                .getBitmap(
-                    MediaMetadata.METADATA_KEY_DISPLAY_ICON
-                )
-                ?.let { bitmap ->
-
-                    if (
-                        isValidArtwork(
-                            bitmap,
-                            minArtDimension
-                        )
-                    ) {
-                        return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
-                    }
-                }
-
-            /*
-             * 3. NotificationListener como fallback.
-             */
-            try {
-
-                val mediaNotification =
-                    getActiveNotifications()
-                        .firstOrNull { sbn ->
-
-                            sbn.packageName ==
-                                    controller.packageName &&
-                                    sbn.notification.category ==
-                                    Notification.CATEGORY_TRANSPORT
-                        }
-
-                if (
-                    mediaNotification != null
-                ) {
-                    val notifTitle = mediaNotification.notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-
-                    /*
-                     * Verificamos que el título de la notificación coincida con el que buscamos.
-                     * Algunas apps (como Metrolist) actualizan el título antes que el icono.
-                     */
-                    if (notifTitle != null && notifTitle.equals(metadata.getString(MediaMetadata.METADATA_KEY_TITLE), ignoreCase = true)) {
-                        /*
-                         * LargeIcon.
-                         */
-                        val largeIconBitmap =
-                            mediaNotification
-                                .notification
-                                .getLargeIcon()
-                                ?.loadDrawable(
-                                    this@MusicNotificationListener
-                                )
-                                ?.toBitmap()
-
-                        if (
-                            largeIconBitmap != null &&
-                            isValidArtwork(
-                                largeIconBitmap,
-                                minArtDimension
-                            )
-                        ) {
-                            return@withContext ensureMaxDimension(largeIconBitmap, MAX_ART_DIMENSION)
-                        }
-
-                        /*
-                         * EXTRA_PICTURE.
-                         */
-                        @Suppress("DEPRECATION")
-                        val picture =
-                            mediaNotification
-                                .notification
-                                .extras
-                                .getParcelable<Bitmap>(
-                                    Notification.EXTRA_PICTURE
-                                )
-
-                        if (
-                            picture != null &&
-                            isValidArtwork(
-                                picture,
-                                minArtDimension
-                            )
-                        ) {
-                            return@withContext ensureMaxDimension(picture, MAX_ART_DIMENSION)
-                        }
-                    }
-                }
-
-            } catch (e: Exception) {
-
-                Log.e(
-                    TAG,
-                    "Fallo consultando notificación activa",
-                    e
-                )
-            }
-
-            /*
-             * 4. ART_URI.
-             */
-            metadata
-                .getString(
-                    MediaMetadata.METADATA_KEY_ART_URI
-                )
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?.let { uri ->
-                    decodeAlbumArtUri(uri)?.let { bitmap ->
-                        if (isValidArtwork(bitmap, minArtDimension)) {
-                            return@withContext bitmap
-                        }
-                    }
-                }
-
-            /*
-             * 5. ALBUM_ART_URI.
-             */
-            metadata
-                .getString(
-                    MediaMetadata
-                        .METADATA_KEY_ALBUM_ART_URI
-                )
-                ?.takeIf {
-                    it.isNotBlank()
-                }
-                ?.let { uri ->
-                    decodeAlbumArtUri(uri)?.let { bitmap ->
-                        if (isValidArtwork(bitmap, minArtDimension)) {
-                            return@withContext bitmap
-                        }
-                    }
-                }
-
-            null
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        val minArtDimension = MIN_ART_DIMENSION
+        val targetTitle = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+        Log.d(TAG, "---- Resolviendo portada para: $targetTitle ----")
+        
+        metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)?.let { bitmap ->
+            if (isValidArtwork(bitmap, minArtDimension)) return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
         }
+        metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)?.let { bitmap ->
+            if (isValidArtwork(bitmap, minArtDimension)) return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
+        }
+        metadata.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)?.let { bitmap ->
+            if (isValidArtwork(bitmap, minArtDimension)) return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
+        }
+        try {
+            val notifications = getActiveNotifications()
+            val mediaNotification = notifications.firstOrNull { sbn ->
+                sbn.packageName == controller.packageName && sbn.notification.category == Notification.CATEGORY_TRANSPORT
+            }
+            if (mediaNotification != null) {
+                val notifTitle = mediaNotification.notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
+                if (notifTitle != null && notifTitle.equals(targetTitle, ignoreCase = true)) {
+                    mediaNotification.notification.getLargeIcon()?.loadDrawable(this@MusicNotificationListener)?.toBitmap()?.let {
+                        if (isValidArtwork(it, minArtDimension)) return@withContext ensureMaxDimension(it, MAX_ART_DIMENSION)
+                    }
+                    @Suppress("DEPRECATION")
+                    mediaNotification.notification.extras.getParcelable<Bitmap>(Notification.EXTRA_PICTURE)?.let {
+                        if (isValidArtwork(it, minArtDimension)) return@withContext ensureMaxDimension(it, MAX_ART_DIMENSION)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallo consultando notificación activa", e)
+        }
+        metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)?.takeIf { it.isNotBlank() }?.let { uri ->
+            decodeAlbumArtUri(uri)?.let { bitmap ->
+                if (isValidArtwork(bitmap, minArtDimension)) return@withContext bitmap
+            }
+        }
+        metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)?.takeIf { it.isNotBlank() }?.let { uri ->
+            decodeAlbumArtUri(uri)?.let { bitmap ->
+                if (isValidArtwork(bitmap, minArtDimension)) return@withContext bitmap
+            }
+        }
+        null
+    }
 
     private fun ensureMaxDimension(bitmap: Bitmap, maxDimension: Int): Bitmap {
         if (bitmap.width <= maxDimension && bitmap.height <= maxDimension) return bitmap
-        
         val ratio = bitmap.width.toFloat() / bitmap.height.toFloat()
         val newWidth: Int
         val newHeight: Int
-
         if (ratio > 1f) {
             newWidth = maxDimension
             newHeight = (maxDimension / ratio).toInt().coerceAtLeast(1)
@@ -1646,7 +2191,6 @@ class MusicNotificationListener : NotificationListenerService() {
             newHeight = maxDimension
             newWidth = (maxDimension * ratio).toInt().coerceAtLeast(1)
         }
-
         return try {
             Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
         } catch (e: Exception) {
@@ -1654,188 +2198,83 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
-    private fun isValidArtwork(
-        bitmap: Bitmap,
-        minDimension: Int
-    ): Boolean {
-
-        return !bitmap.isRecycled &&
-                bitmap.width >= minDimension &&
-                bitmap.height >= minDimension
+    private fun isValidArtwork(bitmap: Bitmap, minDimension: Int): Boolean {
+        return !bitmap.isRecycled && bitmap.width >= minDimension && bitmap.height >= minDimension
     }
 
-    private fun decodeAlbumArtUri(
-        uriString: String
-    ): Bitmap? {
-
-        /*
-         * Spotify Media API URI.
-         *
-         * Se transforma a CDN.
-         */
-        if (
-            uriString.startsWith(
-                SPOTIFY_MEDIA_API_PREFIX
-            )
-        ) {
-
-            val hash =
-                Uri.decode(
-                    uriString
-                )
-                    .substringAfterLast(":")
-                    .substringBefore("?")
-
-            if (
-                hash.isNotBlank()
-            ) {
-                return downloadBitmapFromUrl(
-                    "$SPOTIFY_CDN_PREFIX$hash"
-                )
-            }
+    private suspend fun decodeAlbumArtUri(uriString: String): Bitmap? {
+        if (uriString.startsWith(SPOTIFY_MEDIA_API_PREFIX)) {
+            val hash = Uri.decode(uriString).substringAfterLast(":").substringBefore("?")
+            if (hash.isNotBlank()) return downloadBitmapFromUrl("$SPOTIFY_CDN_PREFIX$hash")
         }
-
-        /*
-         * URL directa.
-         */
-        if (
-            uriString.startsWith(
-                "http://"
-            ) ||
-            uriString.startsWith(
-                "https://"
-            )
-        ) {
-
-            return downloadBitmapFromUrl(
-                uriString
-            )
+        if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
+            return downloadBitmapFromUrl(uriString)
         }
-
-        /*
-         * Content URI genérico.
-         */
         return try {
             contentResolver.openInputStream(Uri.parse(uriString))?.use { input ->
                 decodeSampledBitmapFromStream(input, MAX_ART_DIMENSION, MAX_ART_DIMENSION)
             }
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             Log.e(TAG, "Fallo al decodificar URI: $uriString", e)
             null
         }
     }
 
-    private fun downloadBitmapFromUrl(
-        urlString: String
-    ): Bitmap? {
-
-        var connection:
-                HttpURLConnection? =
-            null
-
-        return try {
-
-            connection =
-                URL(urlString)
-                    .openConnection()
-                        as HttpURLConnection
-
-            connection.connectTimeout =
-                NETWORK_CONNECT_TIMEOUT_MS
-
-            connection.readTimeout =
-                NETWORK_READ_TIMEOUT_MS
-
-            connection.instanceFollowRedirects =
-                true
-
-            connection.doInput =
-                true
-
-            connection.useCaches =
-                true
-
+    private suspend fun downloadBitmapFromUrl(urlString: String): Bitmap? = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
+        try {
+            connection = URL(urlString).openConnection() as HttpURLConnection
+            connection.connectTimeout = NETWORK_CONNECT_TIMEOUT_MS
+            connection.readTimeout = NETWORK_READ_TIMEOUT_MS
+            connection.instanceFollowRedirects = true
+            connection.doInput = true
+            connection.useCaches = true
             connection.connect()
-
-            if (
-                connection.responseCode !in
-                200..299
-            ) {
-
-                Log.w(
-                    TAG,
-                    "HTTP ${connection.responseCode} " +
-                            "descargando artwork"
-                )
-
-                return null
+            if (connection.responseCode !in 200..299) {
+                Log.w(TAG, "HTTP ${connection.responseCode} descargando artwork")
+                return@withContext null
             }
-
             connection.inputStream.use { input ->
+                if (!isActive) return@withContext null
                 decodeSampledBitmapFromStream(input, MAX_ART_DIMENSION, MAX_ART_DIMENSION)
             }
-
-        } catch (
-            e: CancellationException
-        ) {
-
-            throw e
-
         } catch (e: Exception) {
-
-            Log.e(
-                TAG,
-                "Fallo descargando artwork: " +
-                        urlString,
-                e
-            )
-
+            if (e is CancellationException) throw e
+            if (e is SocketException && !isActive) {
+                // Silently ignore
+            } else {
+                Log.e(TAG, "Fallo descargando artwork: $urlString", e)
+            }
             null
-
         } finally {
-
             connection?.disconnect()
         }
     }
 
-    private fun decodeSampledBitmapFromStream(
-        inputStream: java.io.InputStream,
-        reqWidth: Int,
-        reqHeight: Int
-    ): Bitmap? {
+    private fun decodeSampledBitmapFromStream(inputStream: java.io.InputStream, reqWidth: Int, reqHeight: Int): Bitmap? {
         val start = System.currentTimeMillis()
-        // No podemos leer el stream dos veces fácilmente, así que lo copiamos a un buffer
         val buffer = inputStream.readBytes()
-        
-        val options = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(buffer, 0, buffer.size, options)
-
         val originalWidth = options.outWidth
         val originalHeight = options.outHeight
-
         options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
         options.inJustDecodeBounds = false
-        
         val bitmap = BitmapFactory.decodeByteArray(buffer, 0, buffer.size, options)
         val duration = System.currentTimeMillis() - start
-        
         if (bitmap != null) {
             Log.d(TAG, "ARTWORK: source=STREAM original=${originalWidth}x${originalHeight} final=${bitmap.width}x${bitmap.height} decode=${duration}ms cache=false")
         }
-        
         return bitmap
     }
 
     private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
         val (height: Int, width: Int) = options.run { outHeight to outWidth }
         var inSampleSize = 1
-
         if (height > reqHeight || width > reqWidth) {
             val halfHeight: Int = height / 2
             val halfWidth: Int = width / 2
-
             while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
                 inSampleSize *= 2
             }
@@ -1843,435 +2282,166 @@ class MusicNotificationListener : NotificationListenerService() {
         return inSampleSize
     }
 
-    private fun getPlaceholderBitmap():
-            Bitmap {
-
+    private fun getPlaceholderBitmap(): Bitmap {
         return try {
-
-            val drawable =
-                ContextCompat.getDrawable(
-                    applicationContext,
-                    R.drawable.ic_music_note
-                )
-
-            drawable?.toBitmap()
-                ?: Bitmap.createBitmap(
-                    1,
-                    1,
-                    Bitmap.Config.ARGB_8888
-                )
-
+            val drawable = ContextCompat.getDrawable(applicationContext, R.drawable.ic_music_note)
+            drawable?.toBitmap() ?: Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
         } catch (e: Exception) {
-
-            Log.e(
-                TAG,
-                "No se pudo crear placeholder",
-                e
-            )
-
-            Bitmap.createBitmap(
-                1,
-                1,
-                Bitmap.Config.ARGB_8888
-            )
+            Log.e(TAG, "No se pudo crear placeholder", e)
+            Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
         }
     }
 
-    private suspend fun saveTextToFile(
-        text: String,
-        fileName: String
-    ) =
-        withContext(
-            Dispatchers.IO
-        ) {
-
-            fileMutex.withLock {
-
+    private suspend fun saveTextToFile(text: String, fileName: String) = withContext(Dispatchers.IO) {
+        fileMutex.withLock {
+            try {
+                val finalFile = File(filesDir, fileName)
+                val tempFile = File(filesDir, "$fileName.tmp")
+                tempFile.writeText(text)
                 try {
-
-                    val finalFile =
-                        File(
-                            filesDir,
-                            fileName
-                        )
-
-                    val tempFile =
-                        File(
-                            filesDir,
-                            "$fileName.tmp"
-                        )
-
-                    tempFile.writeText(text)
-
-                    try {
-
-                        Files.move(
-                            tempFile.toPath(),
-                            finalFile.toPath(),
-                            StandardCopyOption
-                                .REPLACE_EXISTING,
-                            StandardCopyOption
-                                .ATOMIC_MOVE
-                        )
-
-                    } catch (
-                        _: Exception
-                    ) {
-
-                        Files.move(
-                            tempFile.toPath(),
-                            finalFile.toPath(),
-                            StandardCopyOption
-                                .REPLACE_EXISTING
-                        )
-                    }
-
-                } catch (e: Exception) {
-
-                    Log.e(
-                        TAG,
-                        "Error escribiendo archivo de texto " +
-                                fileName,
-                        e
-                    )
+                    Files.move(tempFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                } catch (_: Exception) {
+                    Files.move(tempFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error escribiendo archivo de texto $fileName", e)
             }
         }
+    }
 
-    private suspend fun saveBitmapToFile(
-        bitmap: Bitmap,
-        fileName: String
-    ) =
-        withContext(
-            Dispatchers.IO
-        ) {
-
-            fileMutex.withLock {
-
-                var scaledBitmap:
-                        Bitmap? =
-                    null
-
-                try {
-
-                    val maxDimension =
-                        MAX_ART_DIMENSION
-
-                    val outputBitmap =
-                        if (
-                            bitmap.width >
-                            maxDimension ||
-                            bitmap.height >
-                            maxDimension
-                        ) {
-
-                            val ratio =
-                                bitmap.width.toFloat() /
-                                        bitmap.height.toFloat()
-
-                            val newWidth: Int
-                            val newHeight: Int
-
-                            if (
-                                ratio > 1f
-                            ) {
-
-                                newWidth =
-                                    maxDimension
-
-                                newHeight =
-                                    (
-                                            maxDimension /
-                                                    ratio
-                                            )
-                                        .toInt()
-                                        .coerceAtLeast(
-                                            1
-                                        )
-
+    private suspend fun saveBitmapToFile(bitmap: Bitmap, fileName: String, applyPillTransform: Boolean = false) = withContext(Dispatchers.IO) {
+        fileMutex.withLock {
+            try {
+                // Paso 3.1: Procesamiento visual en Dispatchers.Default (Matemática pura fuera de IO/Main)
+                val processedBitmap = if (applyPillTransform) {
+                    withContext(Dispatchers.Default) {
+                        val maxDimension = MAX_ART_DIMENSION
+                        val outputBitmap = if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
+                            val ratio = bitmap.width.toFloat() / bitmap.height.toFloat()
+                            val (newWidth, newHeight) = if (ratio > 1f) {
+                                maxDimension to (maxDimension / ratio).toInt().coerceAtLeast(1)
                             } else {
-
-                                newHeight =
-                                    maxDimension
-
-                                newWidth =
-                                    (
-                                            maxDimension *
-                                                    ratio
-                                            )
-                                        .toInt()
-                                        .coerceAtLeast(
-                                            1
-                                        )
+                                (maxDimension * ratio).toInt().coerceAtLeast(1) to maxDimension
                             }
-
-                            scaledBitmap =
-                                Bitmap.createScaledBitmap(
-                                    bitmap,
-                                    newWidth,
-                                    newHeight,
-                                    true
-                                )
-
-                            scaledBitmap!!
-
+                            Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
                         } else {
-
                             bitmap
                         }
-
-                    // Aplicar forma de píldora y rotación si es el artwork principal
-                    val processedBitmap = if (fileName == ALBUM_ART_FILE) {
-                        val density = applicationContext.resources.displayMetrics.density
-                        val pillWidthPx = (110 * density).toInt()
-                        ImageUtils.createRotatedPillBitmap(
-                            source = outputBitmap,
-                            rotationDegrees = -28f,
-                            targetWidth = pillWidthPx,
-                            heightRatio = 0.9f
-                        )
-                    } else {
-                        null
+                        
+                        val pillWidthPx = applicationContext.resources.getDimensionPixelSize(R.dimen.album_art_size_classic)
+                        val result = ImageUtils.createRotatedPillBitmap(outputBitmap, -28f, pillWidthPx, 0.9f)
+                        
+                        if (outputBitmap !== bitmap) outputBitmap.recycle()
+                        result
                     }
-
-                    val bitmapToSave = processedBitmap ?: outputBitmap
-
-                    val finalFile =
-                        File(
-                            filesDir,
-                            fileName
-                        )
-
-                    val tempFile =
-                        File(
-                            filesDir,
-                            "$fileName.tmp"
-                        )
-
-                    FileOutputStream(
-                        tempFile
-                    ).use { output ->
-                        bitmapToSave.compress(
-                            Bitmap.CompressFormat.WEBP_LOSSY,
-                            85,
-                            output
-                        )
-
-                        output.fd.sync()
-                    }
-
-                    // Liberar el bitmap procesado una vez guardado
-                    if (processedBitmap != null && processedBitmap !== outputBitmap) {
-                        processedBitmap.recycle()
-                    }
-
-                    try {
-
-                        Files.move(
-                            tempFile.toPath(),
-                            finalFile.toPath(),
-                            StandardCopyOption
-                                .REPLACE_EXISTING,
-                            StandardCopyOption
-                                .ATOMIC_MOVE
-                        )
-
-                    } catch (
-                        _: Exception
-                    ) {
-
-                        Files.move(
-                            tempFile.toPath(),
-                            finalFile.toPath(),
-                            StandardCopyOption
-                                .REPLACE_EXISTING
-                        )
-                    }
-
-                } catch (e: Exception) {
-
-                    Log.e(
-                        TAG,
-                        "Error escribiendo archivo " +
-                                fileName,
-                        e
-                    )
-
-                } finally {
-
-                    if (
-                        scaledBitmap != null &&
-                        scaledBitmap !== bitmap &&
-                        !scaledBitmap!!
-                            .isRecycled
-                    ) {
-
-                        scaledBitmap!!
-                            .recycle()
-                    }
+                } else {
+                    null
                 }
+
+                val bitmapToSave = processedBitmap ?: bitmap
+                val finalFile = File(filesDir, fileName)
+                val tempFile = File(filesDir, "$fileName.tmp")
+                
+                val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    Bitmap.CompressFormat.WEBP_LOSSY
+                } else {
+                    @Suppress("DEPRECATION")
+                    Bitmap.CompressFormat.WEBP
+                }
+                
+                FileOutputStream(tempFile).use { output ->
+                    bitmapToSave.compress(format, 85, output)
+                    output.fd.sync()
+                }
+                
+                if (processedBitmap != null && processedBitmap !== bitmap) processedBitmap.recycle()
+                
+                try {
+                    Files.move(tempFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                } catch (_: Exception) {
+                    Files.move(tempFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error escribiendo archivo $fileName", e)
             }
         }
+    }
+
+    override fun onListenerDisconnected() {
+        Log.d(TAG, "[DIAGNOSTIC] PERMISSION_SYNC: Listener disconnected. Resetting widget state.")
+        unregisterDynamicScreenReceiver()
+        uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+        super.onListenerDisconnected()
+    }
+
+    private fun unregisterDynamicScreenReceiver() {
+        runCatching {
+            unregisterReceiver(dynamicScreenReceiver)
+        }.onFailure {
+            Log.w(TAG, "Fallo al desregistrar receiver dinámico", it)
+        }
+    }
 
     override fun onDestroy() {
-
-        /*
-         * Cancelamos primero la pipeline.
-         */
+        unregisterDynamicScreenReceiver()
         pendingRefreshJob?.cancel()
-
-        /*
-         * Cancelamos las operaciones de artwork.
-         *
-         * Al estar dentro de serviceScope, la cancelación de
-         * serviceJob también las cancelaría, pero lo hacemos
-         * explícitamente para dejar el estado claro.
-         */
         artworkInFlightMutex.tryLock().let { locked ->
-
             if (locked) {
-
                 try {
-
-                    artworkInFlight
-                        .values
-                        .forEach { deferred ->
-
-                            deferred.cancel()
-                        }
-
+                    artworkInFlight.values.forEach { deferred -> deferred.cancel() }
                     artworkInFlight.clear()
-
                 } finally {
-
                     artworkInFlightMutex.unlock()
                 }
             }
         }
-
-        /*
-         * Quitamos listener de sesiones.
-         */
-        mediaSessionManager
-            .removeOnActiveSessionsChangedListener(
-                sessionsChangedListener
-            )
-
-        /*
-         * Desregistramos callbacks.
-         */
-        controllerCallbacks
-            .forEach {
-                    (controller, callback) ->
-
-                runCatching {
-
-                    controller
-                        .unregisterCallback(
-                            callback
-                        )
-                }
-            }
-
+        mediaSessionManager.removeOnActiveSessionsChangedListener(sessionsChangedListener)
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioManager.unregisterAudioDeviceCallback(audioDeviceCallback)
+        
+        controllerCallbacks.forEach { (controller, callback) ->
+            runCatching { controller.unregisterCallback(callback) }
+        }
         controllerCallbacks.clear()
-
-        selectedController =
-            null
-
-        lastObservedSnapshot =
-            null
-
-        lastAppliedSnapshot =
-            null
-
-        inFlightSnapshot =
-            null
-
-        savedArtworkKey =
-            null
-
+        selectedController = null
+        lastObservedSnapshot = null
+        lastAppliedSnapshot = null
+        inFlightSnapshot = null
+        savedArtworkKey = null
         artworkCache.evictAll()
+        iconVault.clear()
         lyricsUpdateJob?.cancel()
-
+        lyricsFetchJob?.cancel()
         Log.d(TAG, "[DIAGNOSTIC] SERVICE_LIFECYCLE: onDestroy - Process ending")
         serviceJob.cancel()
-
         super.onDestroy()
     }
 
     companion object {
-
-        private const val TAG =
-            "MusicListener"
-
-        /*
-         * Memoria volátil del último estado para evitar parpadeos de carga en el widget.
-         */
+        private const val TAG = "MusicListener"
         private var lastCommittedInfo: MusicInfo? = null
-
         fun getLatestMusicInfo(): MusicInfo? = lastCommittedInfo
 
-        private const val ALBUM_ART_FILE =
-            "album_art.webp"
+        private const val TIER_NONE = 0
+        private const val TIER_COLOR = 1
+        private const val TIER_MONOCHROME = 2
+        private const val TIER_NOTIFICATION = 3
 
-        private const val ALBUM_ART_KEY_FILE =
-            "album_art.key"
-
-        private const val APP_ICON_FILE =
-            "app_icon.webp"
-
-        private const val APP_ICON_KEY_FILE =
-            "app_icon.key"
-
-        private const val MIN_ART_DIMENSION =
-            100
-
-        private const val MAX_ART_DIMENSION =
-            512
-
-        /*
-         * Debounce normal.
-         */
-        private const val NORMAL_DEBOUNCE_MS =
-            150L
-
-        /*
-         * Las notificaciones de transporte pueden reaccionar
-         * ligeramente más rápido.
-         */
-        private const val FAST_DEBOUNCE_MS =
-            100L
-
-        /*
-         * Tiempo adicional para que Spotify termine de actualizar
-         * todos sus campos de metadata. Se aumenta a 400ms para evitar
-         * capturar estados de transición (texto nuevo con portada vieja).
-         */
-        private const val METADATA_STABILIZATION_MS =
-            400L
-
-        private const val NETWORK_CONNECT_TIMEOUT_MS =
-            3000
-
-        private const val NETWORK_READ_TIMEOUT_MS =
-            3000
-
-        /*
-         * Cache de artwork: 8 MB.
-         */
-        private const val ARTWORK_CACHE_SIZE_KB =
-            8 * 1024
-
-        /*
-         * Límite de espera para la resolución de artwork.
-         */
-        private const val ARTWORK_TIMEOUT_MS =
-            7000L
-
-        private const val SPOTIFY_MEDIA_API_PREFIX =
-            "content://com.spotify.mobile.android.mediaapi"
-
-        private const val SPOTIFY_CDN_PREFIX =
-            "https://i.scdn.co/image/"
+        private const val ALBUM_ART_FILE = "album_art.webp"
+        private const val ALBUM_ART_RAW_FILE = "album_art_raw.webp"
+        private const val ALBUM_ART_KEY_FILE = "album_art.key"
+        private const val APP_ICON_FILE = "app_icon.webp"
+        private const val APP_ICON_KEY_FILE = "app_icon.key"
+        private const val MIN_ART_DIMENSION = 100
+        private const val MAX_ART_DIMENSION = 800
+        private const val NORMAL_DEBOUNCE_MS = 150L
+        private const val FAST_DEBOUNCE_MS = 100L
+        private const val METADATA_STABILIZATION_MS = 400L
+        private const val NETWORK_CONNECT_TIMEOUT_MS = 3000
+        private const val NETWORK_READ_TIMEOUT_MS = 3000
+        private const val ARTWORK_CACHE_SIZE_KB = 8 * 1024
+        private const val ARTWORK_TIMEOUT_MS = 7000L
+        private const val SPOTIFY_MEDIA_API_PREFIX = "content://com.spotify.mobile.android.mediaapi"
+        private const val SPOTIFY_CDN_PREFIX = "https://i.scdn.co/image/"
     }
 }

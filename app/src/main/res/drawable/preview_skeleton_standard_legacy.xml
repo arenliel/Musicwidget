@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Referencia de Lienzo 1:1 -->
+    <item android:width="110dp" android:height="110dp">
+        <shape><solid android:color="@android:color/transparent" /></shape>
+    </item>
+
+    <item>
+        <shape>
+            <solid android:color="@color/music_widget_background" />
+            <corners android:radius="16dp" />
+        </shape>
+    </item>
+
+    <!-- Píldora Centrada en su área -->
+    <item
+        android:width="60dp"
+        android:height="60dp"
+        android:gravity="top|start"
+        android:start="17dp"
+        android:top="17dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="20dp" />
+        </shape>
+    </item>
+
+    <!-- Título Base -->
+    <item
+        android:width="70dp"
+        android:height="10dp"
+        android:gravity="bottom|start"
+        android:start="17dp"
+        android:bottom="28dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="4dp" />
+        </shape>
+    </item>
+
+    <!-- Artista Base -->
+    <item
+        android:width="40dp"
+        android:height="6dp"
+        android:gravity="bottom|start"
+        android:start="17dp"
+        android:bottom="17dp">
+        <shape>
+            <solid android:color="@color/music_widget_skeleton" />
+            <corners android:radius="3dp" />
+        </shape>
+    </item>
+</layer-list>
