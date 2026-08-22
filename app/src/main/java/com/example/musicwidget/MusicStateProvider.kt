@@ -21,7 +21,8 @@ object MusicStateProvider {
         packageName = "",
         isPlaying = false,
         isSessionActive = false,
-        lastUpdate = SystemClock.elapsedRealtime()
+        lastUpdateEpoch = System.currentTimeMillis(),
+        observedAtRealtime = android.os.SystemClock.elapsedRealtime()
     )
 
     private val _musicInfoState = MutableStateFlow<MusicInfo>(safeInitialState)
@@ -38,6 +39,7 @@ object MusicStateProvider {
             is MusicUpdateEvent.LyricTick -> reconcileLyric(current, event)
             is MusicUpdateEvent.SessionEnded -> reconcileEnd(current, event)
             is MusicUpdateEvent.StatusUpdate -> reconcileStatus(current, event)
+            is MusicUpdateEvent.ClearVisualHistory -> current.copy(history = emptyList())
         }
 
         if (next == current) return@withLock false
@@ -61,7 +63,8 @@ object MusicStateProvider {
             currentLyric = if (sessionChanged) "" else current.currentLyric,
             lyricsTrackKey = if (sessionChanged) "" else current.lyricsTrackKey,
             history = stableHistory,
-            lastUpdate = SystemClock.elapsedRealtime()
+            lastUpdateEpoch = System.currentTimeMillis(),
+            observedAtRealtime = android.os.SystemClock.elapsedRealtime()
         )
     }
 
@@ -95,7 +98,8 @@ object MusicStateProvider {
         return current.copy(
             isSessionActive = false,
             isPlaying = false,
-            lastUpdate = SystemClock.elapsedRealtime()
+            lastUpdateEpoch = System.currentTimeMillis(),
+            observedAtRealtime = android.os.SystemClock.elapsedRealtime()
         )
     }
     
@@ -117,4 +121,5 @@ sealed class MusicUpdateEvent {
     data class LyricTick(val lyric: String, val trackKey: String) : MusicUpdateEvent()
     data class SessionEnded(val finalPos: Long) : MusicUpdateEvent()
     data class StatusUpdate(val isPlaying: Boolean, val deviceName: String, val deviceType: Int) : MusicUpdateEvent()
+    object ClearVisualHistory : MusicUpdateEvent()
 }

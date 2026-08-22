@@ -224,6 +224,11 @@ class MusicNotificationListener : NotificationListenerService() {
     private var lastProcessedTrack: String? = null
     private var lastProcessedOutcome: String? = null
 
+    /*
+     * MONOTONIC GUARD (v4.5): Rastrea el progreso para detectar bucles (loops).
+     */
+    private var lastObservedPositionMs = 0L
+
     private sealed class HistoryEvent {
         data class TrackStarted(val snapshot: MediaSnapshot, val bufferPath: String?) : HistoryEvent()
         data class TrackEnded(val trackKey: String, val finalSnapshot: MediaSnapshot) : HistoryEvent()
@@ -615,7 +620,7 @@ class MusicNotificationListener : NotificationListenerService() {
                         // REGLA 1: TrackingIdentity (Título + Artista)
                         val identity = "${event.snapshot.title}|${event.snapshot.artist}"
 
-                        if (identity == currentTrackingIdentity && currentTrackingSnapshot != null) {
+                        if (identity == currentTrackingIdentity) {
                             // REGLA 2: Inmutabilidad del Tiempo (Refinamientos)
                             // Actualizamos el snapshot para capturar metadatos refinados (duración, etc)
                             // sin reiniciar el cronómetro de 5 segundos.
@@ -624,21 +629,22 @@ class MusicNotificationListener : NotificationListenerService() {
                         } else {
                             // Nueva pista o Bucle (si el anterior se cerró)
                             currentTrackingIdentity = identity
-                            currentTrackingStartedAt = System.currentTimeMillis()
+                            currentTrackingStartedAt = android.os.SystemClock.elapsedRealtime()
                             currentTrackingSnapshot = event.snapshot
                             Log.d(TAG, "[SHADOW_OBSERVER] Iniciando rastreo para: $identity")
                         }
                     }
                     is HistoryEvent.TrackEnded -> {
                         val identity = "${event.finalSnapshot.title}|${event.finalSnapshot.artist}"
+                        val trackingSnapshot = currentTrackingSnapshot
                         
-                        if (identity == currentTrackingIdentity && currentTrackingSnapshot != null) {
-                            val durationObserved = System.currentTimeMillis() - currentTrackingStartedAt
+                        if (identity == currentTrackingIdentity && trackingSnapshot != null) {
+                            val durationObserved = android.os.SystemClock.elapsedRealtime() - currentTrackingStartedAt
                             val finalPos = calculateEffectiveProgress(event.finalSnapshot)
                             
                             if (durationObserved >= 5000L || finalPos >= 5000L) {
                                 // Consolidación usando Snapshot refinado
-                                commitToHistory(currentTrackingSnapshot, event.finalSnapshot)
+                                commitToHistory(trackingSnapshot, event.finalSnapshot)
                             } else {
                                 Log.d(TAG, "[SHADOW_OBSERVER] Pista descartada (Umbral no met: ${durationObserved}ms)")
                                 cleanupBuffer(event.trackKey)
@@ -1550,7 +1556,7 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     private fun calculateEffectiveProgress(snapshot: MediaSnapshot): Long {
-        if (snapshot.playbackState != PlaybackState.STATE_PLAYING) {
+        if (!snapshot.isSessionActive || snapshot.playbackState != PlaybackState.STATE_PLAYING) {
             return snapshot.maxPositionMs
         }
         val now = SystemClock.elapsedRealtime()
@@ -1672,6 +1678,19 @@ class MusicNotificationListener : NotificationListenerService() {
         // Esto permite que el historial detecte cambios aunque la pantalla esté apagada.
         val previousLogical =
             lastLogicalSnapshot
+
+        // MONOTONIC GUARD (v4.5): Detección de Bucle (Loop)
+        val currentPos = rawSnapshot.positionMs
+        val isLoop = currentPos < lastObservedPositionMs - 5000L && 
+                     previousLogical?.sessionIdentity == rawSnapshot.sessionIdentity
+        
+        if (isLoop) {
+            Log.d(TAG, "[SHADOW_OBSERVER] Bucle detectado (Loop). Forzando cierre de pista anterior.")
+            previousLogical.let { prev ->
+                historyChannel.trySend(HistoryEvent.TrackEnded(prev.trackKey, prev))
+            }
+        }
+        lastObservedPositionMs = currentPos
 
         val sessionChanged = previousLogical?.sessionIdentity != rawSnapshot.sessionIdentity
         val trackContentChanged = previousLogical?.trackKey != rawSnapshot.trackKey
@@ -1816,7 +1835,8 @@ class MusicNotificationListener : NotificationListenerService() {
                 playsToday = plays,
                 skipStreak = skip,
                 isFrequentArtist = freq,
-                lastUpdate = currentMem.lastUpdate // Se mantiene por el Reconciliador v4.0
+                lastUpdateEpoch = currentMem.lastUpdateEpoch,
+                observedAtRealtime = currentMem.observedAtRealtime
             )
             
             val event = if (sessionChanged) {
@@ -2010,8 +2030,10 @@ class MusicNotificationListener : NotificationListenerService() {
                         if (resolvedArtwork != null) {
                             // Hallazgo v3.9: Warm-up de RAM (Zero-Lag)
                             // Inyectamos el bitmap en la caché compartida para que Glance lo lea a 0ms.
+                            // SEGURIDAD IPC (v4.5): Escalado de cortesía para el bus Binder.
+                            val transportBitmap = scaleForTransport(resolvedArtwork)
                             val cacheKey = "${rawSnapshot.artworkKey}_raw"
-                            MusicWidget.bitmapCache.put(cacheKey, resolvedArtwork)
+                            MusicWidget.bitmapCache.put(cacheKey, transportBitmap)
 
                             // Paso 3.2: CACHING DE TRANSFORMACIÓN
                             if (savedArtworkKey != snapshot.artworkKey) {
@@ -2338,6 +2360,24 @@ class MusicNotificationListener : NotificationListenerService() {
         drawable.setBounds(0, 0, renderSize, renderSize)
         drawable.draw(canvas)
         return bitmap
+    }
+
+    private fun scaleForTransport(bitmap: Bitmap): Bitmap {
+        val maxTransportSize = 384
+        if (bitmap.width <= maxTransportSize && bitmap.height <= maxTransportSize) return bitmap
+        
+        val ratio = bitmap.width.toFloat() / bitmap.height.toFloat()
+        val (newWidth, newHeight) = if (ratio > 1f) {
+            maxTransportSize to (maxTransportSize / ratio).toInt().coerceAtLeast(1)
+        } else {
+            (maxTransportSize * ratio).toInt().coerceAtLeast(1) to maxTransportSize
+        }
+        
+        return try {
+            Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+        } catch (e: Exception) {
+            bitmap
+        }
     }
 
     private suspend fun resolveArtworkDeduplicated(

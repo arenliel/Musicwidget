@@ -47,12 +47,16 @@ data class MusicInfo(
     val artworkUri: String = "",
 
     /*
-     * Se mantiene por compatibilidad con el modelo anterior.
-     *
-     * Representa el momento en que se aplicó la última
-     * actualización real.
+     * Representa el momento (Epoch) en que se aplicó la última
+     * actualización real. Usado para UI relativa.
      */
-    val lastUpdate: Long = 0L,
+    val lastUpdateEpoch: Long = 0L,
+
+    /**
+     * Marca de tiempo monotónica del hardware.
+     * Usada exclusivamente para extrapolación de progreso.
+     */
+    val observedAtRealtime: Long = 0L,
 
     /*
      * Identidad del icono de la aplicación (procedente de la notificación).
@@ -262,9 +266,14 @@ class MusicDataStore(
                 "app_icon_key"
             )
 
-        private val LAST_UPDATE =
+        private val LAST_UPDATE_EPOCH =
             longPreferencesKey(
-                "last_update"
+                "last_update_epoch"
+            )
+
+        private val OBSERVED_AT_REALTIME =
+            longPreferencesKey(
+                "observed_at_realtime"
             )
 
         private val BLACKLIST =
@@ -378,8 +387,12 @@ class MusicDataStore(
                     prefs[APP_ICON_KEY]
                         .orEmpty(),
 
-                lastUpdate =
-                    prefs[LAST_UPDATE]
+                lastUpdateEpoch =
+                    prefs[LAST_UPDATE_EPOCH]
+                        ?: 0L,
+
+                observedAtRealtime =
+                    prefs[OBSERVED_AT_REALTIME]
                         ?: 0L,
 
                 blacklist =
@@ -679,13 +692,12 @@ class MusicDataStore(
             prefs[DURATION_MS] = info.durationMs
 
             /*
-             * lastUpdate representa una actualización real de la sesión.
-             * 
-             * Solo se modifica si la identidad cambió o el estado de reproducción cambió.
-             * Las letras o el icono de la app NO resetean el reloj.
+             * lastUpdateEpoch representa una actualización real de la sesión (Epoch).
+             * observedAtRealtime representa el anclaje monotónico.
              */
             if (identityChanged || playbackStatusChanged || forceUpdate) {
-                prefs[LAST_UPDATE] = System.currentTimeMillis()
+                prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
+                prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
             }
         }
         return changed
@@ -955,7 +967,8 @@ class MusicDataStore(
             if (currentName != name || currentType != type) {
                 prefs[PLAYBACK_DEVICE_NAME] = name
                 prefs[PLAYBACK_DEVICE_TYPE] = type
-                prefs[LAST_UPDATE] = System.currentTimeMillis()
+                prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
+                prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
             }
         }
     }
@@ -977,7 +990,8 @@ class MusicDataStore(
             prefs[IS_SESSION_ACTIVE] = false
             prefs[CURRENT_LYRIC] = ""
             prefs[LYRICS_TRACK_KEY] = ""
-            prefs[LAST_UPDATE] = System.currentTimeMillis()
+            prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
+            prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
         }
     }
 

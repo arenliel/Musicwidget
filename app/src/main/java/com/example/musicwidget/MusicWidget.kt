@@ -105,7 +105,13 @@ enum class TextPart { TOP, BOTTOM, ALL }
 
 class ClearHistoryAction : ActionCallback {
     override suspend fun onAction(context: Context, glanceId: GlanceId, parameters: androidx.glance.action.ActionParameters) {
+        // Paso A: Limpieza en Disco
         MusicDataStore(context).clearHistory()
+        
+        // Paso B: Limpieza en RAM (Síncrona y Atómica)
+        MusicStateProvider.applyEvent(MusicUpdateEvent.ClearVisualHistory)
+        
+        // Paso C: Refresco total de la UI
         MusicWidget.updateAll(context)
     }
 }
@@ -441,8 +447,26 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     Image(provider = ImageProvider(R.drawable.clear_all_24px), contentDescription = context.getString(R.string.content_desc_clear_history), colorFilter = ColorFilter.tint(GlanceTheme.colors.onSurfaceVariant), modifier = GlanceModifier.size(historyHeaderIconSize).clickable(actionRunCallback<ClearHistoryAction>()))
                 }
             }
-            LazyColumn(modifier = GlanceModifier.defaultWeight()) { 
-                items(items = itemsToRender, itemId = { item -> item.timestamp }) { item -> HistoryItemRow(context, item) } 
+            if (history.isEmpty()) {
+                Box(
+                    modifier = GlanceModifier.fillMaxSize().padding(top = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = context.getString(R.string.history_empty_state),
+                        style = TextStyle(
+                            color = GlanceTheme.colors.onSurfaceVariant,
+                            fontSize = 12.sp,
+                            fontStyle = androidx.glance.text.FontStyle.Italic
+                        )
+                    )
+                }
+            } else {
+                LazyColumn(modifier = GlanceModifier.defaultWeight()) {
+                    items(items = itemsToRender, itemId = { item -> item.timestamp }) { item -> 
+                        HistoryItemRow(context, item) 
+                    }
+                }
             }
         }
     }
@@ -528,7 +552,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
 
     private fun getStatusText(context: Context, info: MusicInfo): String {
         val now = System.currentTimeMillis()
-        val timeSinceLastUpdate = now - info.lastUpdate
+        val timeSinceLastUpdate = now - info.lastUpdateEpoch
         
         // MOTOR DE CONSCIENCIA TEMPORAL (v2.1)
         // Umbral de 15 minutos para considerar una sesión de pausa como "estancada" (stale).
@@ -542,7 +566,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 context.getString(R.string.status_paused)
             
             else -> { 
-                val time = formatRelativeTime(context, info.lastUpdate)
+                val time = formatRelativeTime(context, info.lastUpdateEpoch)
                 if (time.isEmpty()) context.getString(R.string.status_recently) else time 
             }
         }
@@ -682,7 +706,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 val artistText = when {
                     info.isEmpty -> info.artist
                     info.title == context.getString(R.string.widget_empty_title) -> info.artist
-                    isSnapshot && !isStatusLabelVisible -> { val time = formatRelativeTime(context, info.lastUpdate); if (time.isEmpty()) info.artist else "${info.artist} • $time" }
+                    isSnapshot && !isStatusLabelVisible -> { val time = formatRelativeTime(context, info.lastUpdateEpoch); if (time.isEmpty()) info.artist else "${info.artist} • $time" }
                     info.isSessionActive && info.showLyrics && info.currentLyric.isNotBlank() && info.trackKey == info.lyricsTrackKey -> "“${info.currentLyric}”"
                     else -> info.artist
                 }
@@ -731,10 +755,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         }
     }
 
-    private fun formatRelativeTime(context: Context, lastUpdate: Long): String {
-        if (lastUpdate <= 0) return ""
-        val now = android.os.SystemClock.elapsedRealtime()
-        val diffMillis = now - lastUpdate
+    private fun formatRelativeTime(context: Context, lastUpdateEpoch: Long): String {
+        if (lastUpdateEpoch <= 0) return ""
+        val now = System.currentTimeMillis()
+        val diffMillis = now - lastUpdateEpoch
         val diffHours = diffMillis / (1000 * 60 * 60)
         return when { 
             diffHours < 1 -> context.getString(R.string.widget_time_recently)
