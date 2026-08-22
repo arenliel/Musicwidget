@@ -449,6 +449,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
 
     @Composable
     private fun HistoryItemRow(context: Context, item: HistoryItem) {
+        Log.d("GLANCE_RENDER", "Dibujando ítem de historial: Title = ${item.title} | State = ${if (item.hasPendingArtwork) "PENDING" else "FILE_READY"} | Uri = ${item.artworkUri}")
         val itemTitleSize = spDimen(R.dimen.text_size_history_item_title)
         val itemArtistSize = spDimen(R.dimen.text_size_history_item_artist)
         val artWidth = dimen(R.dimen.history_item_art_width); val artHeight = dimen(R.dimen.history_item_art_height)

@@ -59,6 +59,8 @@ import java.net.SocketException
 import java.net.URL
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.NonCancellable
 import kotlin.math.max
 
 class MusicNotificationListener : NotificationListenerService() {
@@ -104,6 +106,29 @@ class MusicNotificationListener : NotificationListenerService() {
      * Job utilizado para agrupar ráfagas de callbacks.
      */
     private var pendingRefreshJob: Job? = null
+
+    /*
+     * ACTIVE WATCHER (v4.3): Job para la persistencia proactiva de portadas.
+     * Permite capturar la imagen en el instante en que la pista cruza el umbral de 5s.
+     */
+    private var eagerCacheJob: Job? = null
+
+    /*
+     * GATING FLAG (v4.3.3): Indica que existen actualizaciones postergadas por pantalla apagada.
+     */
+    private var hasPendingUpdates = false
+
+    /*
+     * CACHÉ VOLÁTIL DE PORTADAS (v4.3.1): Almacena rutas de archivos pre-procesados.
+     * Evita la redundancia de I/O durante la transición de historial.
+     */
+    private val eagerArtworkPaths = ConcurrentHashMap<String, String>()
+
+    /*
+     * CACHÉ DE MEMORIA INMEDIATA (v4.4): Captura el Bitmap al segundo 0.
+     * Desacopla la carátula de los metadatos dinámicos del sistema para evitar Race Conditions.
+     */
+    private val memoryArtworkCache = ConcurrentHashMap<String, Bitmap>()
 
     /*
      * BÓVEDA DE ICONOS (v2.3): Persistencia volátil del mejor icono por paquete.
@@ -199,8 +224,13 @@ class MusicNotificationListener : NotificationListenerService() {
     private var lastProcessedTrack: String? = null
     private var lastProcessedOutcome: String? = null
 
-    private val historyChannel = Channel<MediaSnapshot>(
-        capacity = 50,
+    private sealed class HistoryEvent {
+        data class TrackStarted(val snapshot: MediaSnapshot, val bufferPath: String?) : HistoryEvent()
+        data class TrackEnded(val trackKey: String, val finalSnapshot: MediaSnapshot) : HistoryEvent()
+    }
+
+    private val historyChannel = Channel<HistoryEvent>(
+        capacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
@@ -308,10 +338,20 @@ class MusicNotificationListener : NotificationListenerService() {
         Log.d(TAG, "[GATING] Display fully visible. Triggering Wake-up Sync.")
         InternalLogger.log(applicationContext, "GATING: Desbloqueo detectado. Forzando reprocesamiento de sesión.")
         
+        if (hasPendingUpdates) {
+            Log.d(TAG, "[GATING] Aplicando actualizaciones postergadas a Glance.")
+            hasPendingUpdates = false
+            serviceScope.launch {
+                MusicWidget.updateAll(applicationContext)
+            }
+        }
+
         // Sincronización de recuperación:
         // Forzamos al proceso a descargar recursos que se omitieron durante el bloqueo.
         serviceScope.launch {
             refreshBestSession(reason = "catch_up_render")
+            // PASO 4: Iniciar reconciliación del historial pendiente
+            reconcilePendingHistoryArtworks()
         }
     }
 
@@ -430,7 +470,9 @@ class MusicNotificationListener : NotificationListenerService() {
 
         lyricsRepository = LyricsRepository(applicationContext)
 
-        startHistoryProcessor()
+        cleanupHistoryBuffer()
+        restoreIdempotencyShield()
+        startHistoryWorker()
         startSeekEventProcessor()
         startUiUpdateDispatcher()
         startBlacklistObserver()
@@ -478,7 +520,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     // REGLA DE ORO (v2.9): Hiato total en reposo para ahorro de batería (Batería Cero)
                     if (!isWidgetPotentiallyVisible()) {
                         Log.d(TAG, "[DIAGNOSTIC] UI_DISPATCHER: Widget no visible. Postponing update.")
-                        
+                        hasPendingUpdates = true
                         // Hallazgo v3.5: Cancelación física del Ticker en reposo
                         lyricsUpdateJob?.cancel()
                         return@collect
@@ -519,10 +561,14 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
-    private fun startHistoryProcessor() {
+    private fun restoreIdempotencyShield() {
         serviceScope.launch {
-            for (snapshot in historyChannel) {
-                processHistoryEvent(snapshot)
+            val history = musicDataStore.musicInfoFlow.first().history
+            if (history.isNotEmpty()) {
+                val last = history.first()
+                lastProcessedTrack = last.trackKey
+                lastProcessedOutcome = if (last.isSkipped) "SKIPPED" else "COMPLETED"
+                Log.d(TAG, "[SHADOW_OBSERVER] Escudo de idempotencia restaurado: ${last.title}")
             }
         }
     }
@@ -557,59 +603,138 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
+    private fun startHistoryWorker() {
+        serviceScope.launch(Dispatchers.IO) {
+            var currentTrackingIdentity: String? = null
+            var currentTrackingStartedAt = 0L
+            var currentTrackingSnapshot: MediaSnapshot? = null
 
-    private suspend fun processHistoryEvent(snapshot: MediaSnapshot) {
+            for (event in historyChannel) {
+                when (event) {
+                    is HistoryEvent.TrackStarted -> {
+                        // REGLA 1: TrackingIdentity (Título + Artista)
+                        val identity = "${event.snapshot.title}|${event.snapshot.artist}"
+
+                        if (identity == currentTrackingIdentity && currentTrackingSnapshot != null) {
+                            // REGLA 2: Inmutabilidad del Tiempo (Refinamientos)
+                            // Actualizamos el snapshot para capturar metadatos refinados (duración, etc)
+                            // sin reiniciar el cronómetro de 5 segundos.
+                            currentTrackingSnapshot = event.snapshot
+                            Log.d(TAG, "[SHADOW_OBSERVER] Refinamiento detectado para: $identity. Manteniendo reloj.")
+                        } else {
+                            // Nueva pista o Bucle (si el anterior se cerró)
+                            currentTrackingIdentity = identity
+                            currentTrackingStartedAt = System.currentTimeMillis()
+                            currentTrackingSnapshot = event.snapshot
+                            Log.d(TAG, "[SHADOW_OBSERVER] Iniciando rastreo para: $identity")
+                        }
+                    }
+                    is HistoryEvent.TrackEnded -> {
+                        val identity = "${event.finalSnapshot.title}|${event.finalSnapshot.artist}"
+                        
+                        if (identity == currentTrackingIdentity && currentTrackingSnapshot != null) {
+                            val durationObserved = System.currentTimeMillis() - currentTrackingStartedAt
+                            val finalPos = calculateEffectiveProgress(event.finalSnapshot)
+                            
+                            if (durationObserved >= 5000L || finalPos >= 5000L) {
+                                // Consolidación usando Snapshot refinado
+                                commitToHistory(currentTrackingSnapshot, event.finalSnapshot)
+                            } else {
+                                Log.d(TAG, "[SHADOW_OBSERVER] Pista descartada (Umbral no met: ${durationObserved}ms)")
+                                cleanupBuffer(event.trackKey)
+                            }
+                            
+                            // REGLA 3: Cierre Explícito (Permite detectar bucles/loops)
+                            currentTrackingIdentity = null
+                            currentTrackingSnapshot = null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun saveBitmapToBuffer(bitmap: Bitmap, trackKey: String): String? {
+        val bufferDir = File(filesDir, "history/buffer")
+        if (!bufferDir.exists()) bufferDir.mkdirs()
+        
+        val fileName = "buf_${trackKey.hashCode()}.webp"
+        val file = File(bufferDir, fileName)
+        
+        try {
+            val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Bitmap.CompressFormat.WEBP_LOSSY
+            } else {
+                @Suppress("DEPRECATION")
+                Bitmap.CompressFormat.WEBP
+            }
+            FileOutputStream(file).use { out ->
+                bitmap.compress(format, 80, out)
+                out.flush()
+            }
+            return file.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving history buffer", e)
+            return null
+        }
+    }
+
+    private fun cleanupBuffer(trackKey: String) {
+        val bufferDir = File(filesDir, "history/buffer")
+        val fileName = "buf_${trackKey.hashCode()}.webp"
+        val file = File(bufferDir, fileName)
+        if (file.exists()) file.delete()
+    }
+
+    private fun cleanupHistoryBuffer() {
+        val bufferDir = File(filesDir, "history/buffer")
+        if (bufferDir.exists()) {
+            bufferDir.listFiles()?.forEach { it.delete() }
+        }
+    }
+
+    private suspend fun commitToHistory(startSnapshot: MediaSnapshot, endSnapshot: MediaSnapshot) {
         try {
             val historyDir = File(filesDir, "history")
             if (!historyDir.exists()) historyDir.mkdirs()
 
-            val artworkFile = File(historyDir, "art_${snapshot.trackKey.hashCode()}.webp")
-
-            // 1. Si la imagen NO existe, la resolvemos y guardamos
-            if (!artworkFile.exists()) {
-                val bitmap = when (val source = snapshot.artworkSource) {
-                    is ArtworkSource.Bitmap -> source.bitmap
-                    is ArtworkSource.Uri -> decodeAlbumArtUri(source.uri)
-                    ArtworkSource.Placeholder -> null
+            // REGLA 1: VaultKey (T+A+D Final) para nombrar el archivo
+            val trackKey = "${endSnapshot.title}|${endSnapshot.artist}|${endSnapshot.durationMs}"
+            
+            val bufferDir = File(filesDir, "history/buffer")
+            val bufferFile = File(bufferDir, "buf_${startSnapshot.trackKey.hashCode()}.webp")
+            
+            val artworkFile = File(historyDir, "art_${trackKey.hashCode()}.webp")
+            
+            if (bufferFile.exists()) {
+                // PHASE C: Consolidación (Shadow Observer)
+                withContext(Dispatchers.IO) {
+                    Files.move(bufferFile.toPath(), artworkFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
                 }
-
-                val finalBitmap = bitmap ?: getPlaceholderBitmap()
-
-                val density = applicationContext.resources.displayMetrics.density
-                val w = (80 * density).toInt()
-                val h = (40 * density).toInt()
-                val historyPill = ImageUtils.createHorizontalPill(finalBitmap, w, h)
-
-                val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Bitmap.CompressFormat.WEBP_LOSSY
-                } else {
-                    @Suppress("DEPRECATION")
-                    Bitmap.CompressFormat.WEBP
-                }
-
-                FileOutputStream(artworkFile).use { out ->
-                    historyPill.compress(format, 80, out)
-                }
-                historyPill.recycle()
-            }
-
-            // 2. Clasificación de 3 Bandas con Motor Maestro
-            val finalPos = calculateEffectiveProgress(snapshot)
-            val progressFactor = if (snapshot.durationMs > 0) {
-                finalPos.toFloat() / snapshot.durationMs.toFloat()
+                Log.d(TAG, "[SHADOW_OBSERVER] Portada consolidada para: $trackKey")
             } else {
-                1.0f // Fallback: asumimos completa si no hay duración
+                // Fallback: Si no hay buffer, intentamos persistir desde memoria (Fase A)
+                val memoryBitmap = memoryArtworkCache[trackKey]
+                if (memoryBitmap != null && !artworkFile.exists()) {
+                    val density = applicationContext.resources.displayMetrics.density
+                    val w = (80 * density).toInt()
+                    val h = (40 * density).toInt()
+                    val historyPill = ImageUtils.createHorizontalPill(memoryBitmap, w, h)
+                    ArtworkStorageManager.saveHistoryArtwork(applicationContext, historyPill, trackKey)
+                    historyPill.recycle()
+                }
             }
+
+            val hasArtwork = artworkFile.exists()
+            val finalPos = calculateEffectiveProgress(endSnapshot)
+            val progressFactor = if (startSnapshot.durationMs > 0) {
+                finalPos.toFloat() / startSnapshot.durationMs.toFloat()
+            } else 1.0f
 
             var isSkipped = progressFactor < 0.4f
-            
-            // Hallazgo v3.8: Inmunidad Bendecida desde RAM (Claude)
             val currentRAM = MusicStateProvider.current()
-            val isBlessed = currentRAM.history.any { it.trackKey == snapshot.trackKey && !it.isSkipped }
-            if (isBlessed && isSkipped) {
-                InternalLogger.log(applicationContext, "BLESSED: Anulando skip para canción favorita en RAM")
-                isSkipped = false
-            }
+            val isBlessed = currentRAM.history.any { it.trackKey == trackKey && !it.isSkipped }
+            if (isBlessed && isSkipped) isSkipped = false
 
             val isPartial = !isSkipped && progressFactor < 0.85f
 
@@ -619,62 +744,35 @@ class MusicNotificationListener : NotificationListenerService() {
                 else -> "COMPLETED"
             }
 
-            // BLOQUEO ESTRICTO: Descarta callbacks duplicados de la misma canción y resultado en ráfaga
-            if (snapshot.trackKey == lastProcessedTrack && outcome == lastProcessedOutcome) {
-                Log.d(TAG, "[DIAGNOSTIC] DEDUPLICATOR: Evento duplicado bloqueado para ${snapshot.title} ($outcome)")
-                return
-            }
-
-            lastProcessedTrack = snapshot.trackKey
+            if (trackKey == lastProcessedTrack && outcome == lastProcessedOutcome) return
+            lastProcessedTrack = trackKey
             lastProcessedOutcome = outcome
 
-            // Actualizar racha en DataStore y obtener el valor nuevo
-            val newStreak = musicDataStore.updateSkipStreak(
-                snapshot.title,
-                snapshot.artist,
-                isSkip = isSkipped,
-                isPartial = isPartial
-            )
+            val newStreak = musicDataStore.updateSkipStreak(startSnapshot.title, startSnapshot.artist, isSkipped, isPartial)
+            val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, isSkipped)
+            if (!isSkipped && !isPartial) musicDataStore.updateArtistStats(startSnapshot.artist)
 
-            // Actualizar analítica de repetición (Flama/Infinito)
-            val repeatAnalytics = musicDataStore.updateRepeatStats(
-                snapshot.title,
-                snapshot.artist,
-                isSkip = isSkipped
-            )
-
-            // Actualizar analítica de fidelidad del artista (Corazón ❤️)
-            // Solo si la canción fue completada (no es skip ni parcial)
-            if (!isSkipped && !isPartial) {
-                musicDataStore.updateArtistStats(snapshot.artist)
-            }
-
-            // 3. Commit al DataStore (La lógica de unicidad LRU e Inmunidad está en addToHistory)
             val historyItem = HistoryItem(
-                title = snapshot.title,
-                artist = snapshot.artist,
-                packageName = snapshot.packageName,
+                title = endSnapshot.title,
+                artist = endSnapshot.artist,
+                packageName = endSnapshot.packageName,
                 artworkPath = artworkFile.absolutePath,
-                artworkKey = snapshot.artworkKey,
-                trackKey = snapshot.trackKey,
-                timestamp = snapshot.recordedAt,
+                artworkKey = endSnapshot.artworkKey,
+                trackKey = trackKey,
+                timestamp = System.currentTimeMillis(),
                 isSkipped = isSkipped,
                 skipStreak = newStreak,
                 playsToday = repeatAnalytics.first,
-                streakDays = repeatAnalytics.second
+                streakDays = repeatAnalytics.second,
+                artworkUri = if (hasArtwork) Uri.fromFile(artworkFile).toString() else (endSnapshot.artworkUri ?: ""),
+                hasPendingArtwork = !hasArtwork
             )
             
-            if (isSkipped) {
-                Log.d(TAG, "[DIAGNOSTIC] HISTORY: Guardando ${snapshot.title} con estatus SKIP (Progreso: ${(progressFactor*100).toInt()}%)")
-            }
-            
             musicDataStore.addToHistory(historyItem)
-
-            // 3. Limpieza de archivos antiguos
             cleanupHistoryFiles()
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error procesando evento de historial para ${snapshot.title}", e)
+            Log.e(TAG, "Error en commitToHistory para ${startSnapshot.title}", e)
         }
     }
 
@@ -694,6 +792,138 @@ class MusicNotificationListener : NotificationListenerService() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error limpiando archivos de historial", e)
+        }
+    }
+
+    /**
+     * Reconciliador de Catch-Up Histórico (PASO 3).
+     * Sanea portadas pendientes cuando el widget vuelve a ser visible.
+     */
+    /**
+     * EAGER CACHING (v4.4): Persistencia proactiva de la portada.
+     * FASE B: Evaluación de Permanencia (Segundo 5).
+     */
+    private suspend fun persistHistoryArtworkEagerly(snapshot: MediaSnapshot) {
+        withContext(Dispatchers.IO) {
+            try {
+                val trackKey = snapshot.trackKey
+                val historyDir = File(filesDir, "history")
+                val artworkFile = File(historyDir, "art_${trackKey.hashCode()}.webp")
+                
+                // Si ya existe en disco, registramos en caché de rutas y salimos
+                if (artworkFile.exists()) {
+                    eagerArtworkPaths[trackKey] = artworkFile.absolutePath
+                    return@withContext
+                }
+
+                // Intentamos obtener el Bitmap de la caché de memoria (Fase A)
+                val bitmap = memoryArtworkCache[trackKey] ?: when (val source = snapshot.artworkSource) {
+                    is ArtworkSource.Bitmap -> source.bitmap
+                    is ArtworkSource.Uri -> if (isWidgetPotentiallyVisible()) decodeAlbumArtUri(source.uri) else null
+                    else -> null
+                }
+
+                if (bitmap != null) {
+                    val density = applicationContext.resources.displayMetrics.density
+                    val w = (80 * density).toInt()
+                    val h = (40 * density).toInt()
+                    val historyPill = ImageUtils.createHorizontalPill(bitmap, w, h)
+
+                    try {
+                        val finalPath = ArtworkStorageManager.saveHistoryArtwork(
+                            applicationContext,
+                            historyPill,
+                            trackKey
+                        )
+                        eagerArtworkPaths[trackKey] = finalPath
+
+                        // REACTIVE UPDATE: Manejo de condición de carrera (Skip tardío)
+                        val currentHistory = MusicStateProvider.current().history
+                        val pendingItem = currentHistory.find { 
+                            it.trackKey == trackKey && it.hasPendingArtwork 
+                        }
+
+                        if (pendingItem != null) {
+                            musicDataStore.updateHistoryItemArtworkStatus(
+                                trackKey, 
+                                pendingItem.timestamp, 
+                                false
+                            )
+                            
+                            // Fase D: Screen-Gated Rendering
+                            if (isWidgetPotentiallyVisible()) {
+                                Log.d("GLANCE_REFRESH", "Archivo guardado para $trackKey. Solicitando updateAll a Glance.")
+                                MusicWidget.updateAll(applicationContext)
+                            } else {
+                                Log.d(TAG, "[GATING] Portada resuelta con pantalla apagada. Postergando refresco.")
+                                hasPendingUpdates = true
+                            }
+                            Log.d(TAG, "[REACTIVE_FIX] Sincronización tardía completada para: ${snapshot.title}")
+                        }
+                    } finally {
+                        historyPill.recycle()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error en persistencia proactiva", e)
+            }
+        }
+    }
+
+    private suspend fun reconcilePendingHistoryArtworks() {
+        // Obtenemos el historial actual de la RAM
+        val history = MusicStateProvider.current().history
+        val pending = history.filter { it.hasPendingArtwork }
+        if (pending.isEmpty()) return
+
+        Log.d(TAG, "[CATCH-UP] Iniciando reconciliación de ${pending.size} portadas.")
+
+        pending.forEach { item ->
+            val historyDir = File(filesDir, "history")
+            val artworkFile = File(historyDir, "art_${item.trackKey.hashCode()}.webp")
+            val tempFile = File(historyDir, "art_${item.trackKey.hashCode()}.tmp")
+            
+            // Intentar resolución usando URI almacenada
+            val bitmap = if (item.artworkUri.isNotBlank()) {
+                decodeAlbumArtUri(item.artworkUri)
+            } else {
+                // Fallback: Si no hay URI, intentamos buscar por metadatos (limitado)
+                null
+            }
+            
+            if (bitmap != null) {
+                val density = applicationContext.resources.displayMetrics.density
+                val w = (80 * density).toInt()
+                val h = (40 * density).toInt()
+                val historyPill = ImageUtils.createHorizontalPill(bitmap, w, h)
+
+                val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    Bitmap.CompressFormat.WEBP_LOSSY
+                } else {
+                    @Suppress("DEPRECATION")
+                    Bitmap.CompressFormat.WEBP
+                }
+
+                try {
+                    FileOutputStream(tempFile).use { out ->
+                        if (historyPill.compress(format, 80, out)) {
+                            out.flush()
+                            if (tempFile.renameTo(artworkFile)) {
+                                // Actualizar estatus en DataStore (Atomic Commit)
+                                musicDataStore.updateHistoryItemArtworkStatus(item.trackKey, item.timestamp, false)
+                                Log.d("GLANCE_REFRESH", "Portada reconciliada para ${item.trackKey}. Solicitando updateAll a Glance. Estado -> FILE_READY")
+                                MusicWidget.updateAll(applicationContext)
+                                Log.d(TAG, "[CATCH-UP] Portada resuelta para: ${item.title}")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error guardando artwork reconciliado de forma atómica", e)
+                } finally {
+                    if (tempFile.exists()) tempFile.delete()
+                    historyPill.recycle()
+                }
+            }
         }
     }
 
@@ -960,6 +1190,13 @@ class MusicNotificationListener : NotificationListenerService() {
                             reason =
                                 "session_destroyed"
                         )
+                        
+                        // TRIGGER DE CIERRE (v4.3)
+                        lastLogicalSnapshot?.let { last ->
+                            if (last.packageName == controller.packageName) {
+                                historyChannel.trySend(HistoryEvent.TrackEnded(last.trackKey, last))
+                            }
+                        }
                     }
                 }
 
@@ -1058,10 +1295,11 @@ class MusicNotificationListener : NotificationListenerService() {
         if (
             activeSessions.isEmpty()
         ) {
-            // Hallazgo v4.1: Cierre de Sesión Pasivo (Sin historial)
-            // Respetamos la regla: El historial solo se escribe en la transición a otra canción.
             lastLogicalSnapshot?.let { last ->
                 serviceScope.launch {
+                    // TRIGGER DE CIERRE (v4.3)
+                    historyChannel.trySend(HistoryEvent.TrackEnded(last.trackKey, last))
+                    
                     val finalPos = calculateEffectiveProgress(last)
                     musicDataStore.clearActiveSession()
                     
@@ -1276,6 +1514,20 @@ class MusicNotificationListener : NotificationListenerService() {
         // REGLA: Usamos el caché para evitar sondeos en cada track change
         val deviceName = cachedAudioDeviceName
         val deviceType = cachedAudioDeviceType
+
+        val trackKeyStr = "$title|$artist|$duration"
+
+        // FASE A: Captura Inmediata (Segundo 0)
+        // Intentamos extraer y clonar el bitmap del sistema mientras está fresco
+        metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)?.let { original ->
+            if (!memoryArtworkCache.containsKey(trackKeyStr)) {
+                runCatching {
+                    val clone = original.copy(original.config ?: Bitmap.Config.ARGB_8888, false)
+                    memoryArtworkCache[trackKeyStr] = clone
+                    Log.d(TAG, "[ART_LIFECYCLE] Fase A: Bitmap clonado en RAM para $title")
+                }
+            }
+        }
 
         return MediaSnapshot(
             packageName = controller.packageName,
@@ -1493,27 +1745,45 @@ class MusicNotificationListener : NotificationListenerService() {
             firstObservedAt = firstObservedAt,
             // Hallazgo v4.2: Propagación de Watermark y Assets en el Relay
             maxPositionMs = Math.max(previousLogical?.maxPositionMs ?: 0L, rawSnapshot.positionMs),
-            artworkSource = previousLogical?.artworkSource ?: rawSnapshot.artworkSource
+            artworkSource = rawSnapshot.artworkSource
         )
 
-        // STAGE 1: DISPARADOR DE HISTORIAL (Solo en transición real)
-        if (sessionChanged && !isMetadataRefinement && previousLogical != null && previousLogical.title.isNotEmpty()) {
-            val finalEstimatedPos = calculateEffectiveProgress(previousLogical)
+        // --- STAGE 0: GESTIÓN DE HISTORIAL (AISLAMIENTO v4.3) ---
+        if (sessionChanged && !isMetadataRefinement) {
+            // Notificar fin de la pista anterior
+            previousLogical?.let { prev ->
+                historyChannel.trySend(HistoryEvent.TrackEnded(prev.trackKey, prev))
+            }
             
-            val durationObserved = System.currentTimeMillis() - previousLogical.firstObservedAt
-
-            if (durationObserved > 5000L || finalEstimatedPos >= 5000L) {
-                val historySnapshot = previousLogical.copy(
-                    maxPositionMs = finalEstimatedPos,
-                    recordedAt = System.currentTimeMillis()
-                )
-                InternalLogger.log(applicationContext, "HISTORY: Guardando en historial: ${previousLogical.title}")
-                historyChannel.trySend(historySnapshot)
+            // Captura inmediata y notificación de inicio de nueva pista (Phase A)
+            val bitmap = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            if (bitmap != null) {
+                serviceScope.launch(Dispatchers.IO) {
+                    val bufferPath = saveBitmapToBuffer(bitmap, rawSnapshot.trackKey)
+                    historyChannel.trySend(HistoryEvent.TrackStarted(rawSnapshot, bufferPath))
+                }
+            } else {
+                historyChannel.trySend(HistoryEvent.TrackStarted(rawSnapshot, null))
             }
         }
 
         // ACTUALIZACIÓN DEL DIARIO LÓGICO
         lastLogicalSnapshot = snapshot
+
+        // ACTIVE WATCHER (v4.3.1): Cronómetro proactivo de 5s con LATE-READ
+        if (snapshot.playbackState == PlaybackState.STATE_PLAYING && (trackContentChanged || eagerCacheJob == null)) {
+            eagerCacheJob?.cancel()
+            eagerCacheJob = serviceScope.launch {
+                delay(5000L)
+                // Obtenemos el estado refinado (con portada cargada) tras la espera
+                val refinedSnapshot = lastLogicalSnapshot ?: return@launch
+                persistHistoryArtworkEagerly(refinedSnapshot)
+            }
+        } else if (snapshot.playbackState != PlaybackState.STATE_PLAYING) {
+            // Cancelación inmediata en pausa/stop para ahorro de recursos
+            eagerCacheJob?.cancel()
+            eagerCacheJob = null
+        }
 
         // FAST-TRACK SSOT (v4.0 - Relevo Atómico de RAM)
         serviceScope.launch {

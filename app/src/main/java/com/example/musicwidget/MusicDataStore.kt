@@ -1,6 +1,8 @@
 package arenliel.musicwidget
 
 import android.content.Context
+import android.net.Uri
+import android.util.Log
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -171,7 +173,9 @@ data class HistoryItem(
     val isSkipped: Boolean = false,
     val skipStreak: Int = 0,
     val playsToday: Int = 0,
-    val streakDays: Int = 0
+    val streakDays: Int = 0,
+    val artworkUri: String = "",
+    val hasPendingArtwork: Boolean = false
 )
 
 /**
@@ -510,7 +514,9 @@ class MusicDataStore(
                     isSkipped = obj.optBoolean("sk", false),
                     skipStreak = obj.optInt("ss", 0),
                     playsToday = obj.optInt("pt", 0),
-                    streakDays = obj.optInt("sd", 0)
+                    streakDays = obj.optInt("sd", 0),
+                    artworkUri = obj.optString("au", ""),
+                    hasPendingArtwork = obj.optBoolean("pa", false)
                 )
             }
         } catch (e: Exception) {
@@ -533,6 +539,8 @@ class MusicDataStore(
             obj.put("ss", item.skipStreak)
             obj.put("pt", item.playsToday)
             obj.put("sd", item.streakDays)
+            obj.put("au", item.artworkUri)
+            obj.put("pa", item.hasPendingArtwork)
             array.put(obj)
         }
         return array.toString()
@@ -724,6 +732,28 @@ class MusicDataStore(
             if (isBlessed) {
                 resetSkipStreakInternal(prefs, item.title, item.artist)
             }
+        }
+    }
+
+    /**
+     * Actualiza quirúrgicamente el estado de una portada pendiente en el historial.
+     */
+    suspend fun updateHistoryItemArtworkStatus(trackKey: String, timestamp: Long, isPending: Boolean) {
+        context.dataStore.edit { prefs ->
+            val currentHistoryJson = prefs[HISTORY].orEmpty()
+            val oldHistory = decodeHistory(currentHistoryJson)
+            
+            val newHistory = oldHistory.map { item ->
+                if (item.trackKey == trackKey && item.timestamp == timestamp) {
+                    val localUri = if (!isPending) Uri.fromFile(java.io.File(item.artworkPath)).toString() else item.artworkUri
+                    Log.d("DATASTORE_MUTATION", "Actualizando URI de portada para trackKey: $trackKey -> Nueva URI: $localUri (isPending: $isPending)")
+                    item.copy(hasPendingArtwork = isPending, artworkUri = localUri)
+                } else {
+                    item
+                }
+            }
+            
+            prefs[HISTORY] = encodeHistory(newHistory)
         }
     }
 
