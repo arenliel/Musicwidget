@@ -1192,17 +1192,22 @@ class MusicNotificationListener : NotificationListenerService() {
                                 null
                         }
 
+                        // REGLA v4.7: Escudo Now Playing.
+                        // Cuando la sesión muere, NO disparamos historial ni purgamos datos.
+                        // Solo notificamos a la RAM el cambio de infraestructura.
+                        lastLogicalSnapshot?.let { last ->
+                            if (last.packageName == controller.packageName) {
+                                serviceScope.launch {
+                                    MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(0L))
+                                    uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+                                }
+                            }
+                        }
+
                         requestRefresh(
                             reason =
                                 "session_destroyed"
                         )
-                        
-                        // TRIGGER DE CIERRE (v4.3)
-                        lastLogicalSnapshot?.let { last ->
-                            if (last.packageName == controller.packageName) {
-                                historyChannel.trySend(HistoryEvent.TrackEnded(last.trackKey, last))
-                            }
-                        }
                     }
                 }
 
@@ -1303,13 +1308,10 @@ class MusicNotificationListener : NotificationListenerService() {
         ) {
             lastLogicalSnapshot?.let { last ->
                 serviceScope.launch {
-                    // TRIGGER DE CIERRE (v4.3)
-                    historyChannel.trySend(HistoryEvent.TrackEnded(last.trackKey, last))
-                    
+                    // REGLA v4.7: NO disparamos historial por muerte de sesión.
+                    // Solo marcamos como inactiva para el visualizador.
                     val finalPos = calculateEffectiveProgress(last)
-                    musicDataStore.clearActiveSession()
                     
-                    // Notificamos a la RAM el fin de sesión atómico
                     if (MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(finalPos))) {
                         uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
                     }
@@ -1693,6 +1695,13 @@ class MusicNotificationListener : NotificationListenerService() {
         lastObservedPositionMs = currentPos
 
         val sessionChanged = previousLogical?.sessionIdentity != rawSnapshot.sessionIdentity
+        
+        if (sessionChanged) {
+            // Limpieza de Memoria RAM (v4.6.2): Purga de portadas antiguas para evitar OOM
+            val currentKey = rawSnapshot.trackKey
+            memoryArtworkCache.keys.retainAll(setOf(currentKey))
+        }
+
         val trackContentChanged = previousLogical?.trackKey != rawSnapshot.trackKey
 
         // Paso 2.2: GUARD CLAUSE (Evita procesar snapshots redundantes en Disco)
@@ -2486,6 +2495,23 @@ class MusicNotificationListener : NotificationListenerService() {
                 if (isValidArtwork(bitmap, minArtDimension)) return@withContext bitmap
             }
         }
+
+        // FALLBACK v4.6.2: Bóveda de Reserva (Fase A)
+        // Si no se encontró en el sistema ni en notificaciones, buscamos en nuestra captura inmediata.
+        // Reconstruimos la trackKey para mayor seguridad en sesiones remotas.
+        val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: "Unknown Artist"
+        val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
+        val trackKey = "$targetTitle|$artist|$duration"
+        
+        val fallbackBitmap = memoryArtworkCache[artworkKey] ?: memoryArtworkCache[trackKey]
+        
+        fallbackBitmap?.let { bitmap ->
+            if (isValidArtwork(bitmap, minArtDimension)) {
+                Log.d(TAG, "[ART_LIFECYCLE] Fallback exitoso desde Fase A para: $targetTitle")
+                return@withContext ensureMaxDimension(bitmap, MAX_ART_DIMENSION)
+            }
+        }
+
         null
     }
 

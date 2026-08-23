@@ -59,12 +59,14 @@ object MusicStateProvider {
             e.info.history
         }
 
+        val shouldResetClock = sessionChanged || e.info.isPlaying
+
         return e.info.copy(
             currentLyric = if (sessionChanged) "" else current.currentLyric,
             lyricsTrackKey = if (sessionChanged) "" else current.lyricsTrackKey,
             history = stableHistory,
-            lastUpdateEpoch = System.currentTimeMillis(),
-            observedAtRealtime = android.os.SystemClock.elapsedRealtime()
+            lastUpdateEpoch = if (shouldResetClock) System.currentTimeMillis() else current.lastUpdateEpoch,
+            observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime
         )
     }
 
@@ -97,9 +99,7 @@ object MusicStateProvider {
     private fun reconcileEnd(current: MusicInfo, e: MusicUpdateEvent.SessionEnded): MusicInfo {
         return current.copy(
             isSessionActive = false,
-            isPlaying = false,
-            lastUpdateEpoch = System.currentTimeMillis(),
-            observedAtRealtime = android.os.SystemClock.elapsedRealtime()
+            isPlaying = false
         )
     }
     

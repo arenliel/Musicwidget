@@ -694,8 +694,13 @@ class MusicDataStore(
             /*
              * lastUpdateEpoch representa una actualización real de la sesión (Epoch).
              * observedAtRealtime representa el anclaje monotónico.
+             *
+             * REGLA v4.7: forceUpdate NO resetea el reloj (solo sirve para emitir datos visuales).
+             * El reloj solo se mueve si la identidad cambió o si pasamos a PLAYING.
              */
-            if (identityChanged || playbackStatusChanged || forceUpdate) {
+            val shouldResetClock = identityChanged || (playbackStatusChanged && info.isPlaying)
+
+            if (shouldResetClock) {
                 prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
                 prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
             }
@@ -963,12 +968,17 @@ class MusicDataStore(
         context.dataStore.edit { prefs ->
             val currentName = prefs[PLAYBACK_DEVICE_NAME] ?: ""
             val currentType = prefs[PLAYBACK_DEVICE_TYPE] ?: 0
-            
+            val isPlaying = prefs[IS_PLAYING] ?: false
+
             if (currentName != name || currentType != type) {
                 prefs[PLAYBACK_DEVICE_NAME] = name
                 prefs[PLAYBACK_DEVICE_TYPE] = type
-                prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
-                prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
+
+                // REGLA v4.7: Solo reseteamos el reloj si el hardware cambia MIENTRAS suena.
+                if (isPlaying) {
+                    prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
+                    prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
+                }
             }
         }
     }
@@ -990,8 +1000,7 @@ class MusicDataStore(
             prefs[IS_SESSION_ACTIVE] = false
             prefs[CURRENT_LYRIC] = ""
             prefs[LYRICS_TRACK_KEY] = ""
-            prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
-            prefs[OBSERVED_AT_REALTIME] = android.os.SystemClock.elapsedRealtime()
+            // REGLA v4.7: No reseteamos el reloj al purgar (mantenemos inactividad previa)
         }
     }
 
