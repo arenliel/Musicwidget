@@ -4,6 +4,14 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val gitSha: String = providers.exec {
+    commandLine("git", "rev-parse", "--short", "HEAD")
+}.standardOutput.asText.get().trim()
+
+val buildTime: String = providers.exec {
+    commandLine("git", "show", "-s", "--format=%ct", "HEAD")
+}.standardOutput.asText.get().trim()
+
 android {
     namespace = "arenliel.musicwidget"
     compileSdk {
@@ -18,6 +26,9 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("long", "BUILD_TIME", "${buildTime}000L")
     }
 
     buildTypes {
@@ -33,6 +44,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

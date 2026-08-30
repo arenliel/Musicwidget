@@ -149,6 +149,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         fun clearMemoryCache() { bitmapCache.evictAll() }
 
         suspend fun updateAll(context: Context) {
+            InternalLogger.init(context)
             InternalLogger.log(context, "UPDATE: Disparando actualización en cascada (Global).")
             // Actualización determinista basada en la enumeración de identidades (v1.6.3)
             WidgetAppearance.values().forEach { appearance ->
@@ -229,7 +230,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
 
             val isArtworkSynchronized = displayedInfo.artworkKey.trim() == readTextFile(File(context.filesDir, ALB_KEY_FILE)).trim() && displayedInfo.artworkKey.isNotBlank()
 
-            val albumArtBitmap by androidx.compose.runtime.produceState<Bitmap?>(initialValue = null, displayedInfo.artworkKey, needsPillAsset, isArtworkSynchronized) {
+            val albumArtBitmap by androidx.compose.runtime.produceState<Bitmap?>(initialValue = null, displayedInfo.artworkKey, displayedInfo.sessionUUID, needsPillAsset, isArtworkSynchronized) {
                 if (isArtworkSynchronized) {
                     val cacheKey = "${displayedInfo.artworkKey}_${if(needsPillAsset) "pill" else "raw"}"
                     bitmapCache.get(cacheKey)?.also { value = it } ?: withContext(Dispatchers.IO) {
@@ -240,7 +241,26 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                         )
                         decoded?.also { bitmapCache.put(cacheKey, it); value = it }
                     }
-                } else value = null
+                } else {
+                    // PIPELINE DE FALLBACK IDEMPOTENTE (v5.2): Prioridad Imagen sobre Llave
+                    if (!displayedInfo.isEmpty) {
+                        withContext(Dispatchers.IO) {
+                            // Paso 1: Intentar rescatar del Buffer de Sesión (UUID Inmutable)
+                            val sessionBuffer = File(context.filesDir, "history/buffer/buf_${displayedInfo.sessionUUID}.webp")
+                            if (sessionBuffer.exists()) {
+                                value = decodeBitmap(sessionBuffer, 800, 800)
+                            } 
+                            
+                            // Paso 2: Si falla, rescatar del Disk Shield Maestro
+                            if (value == null) {
+                                val shieldFile = File(context.cacheDir, "current_artwork_raw.webp")
+                                if (shieldFile.exists()) {
+                                    value = decodeBitmap(shieldFile, 800, 800)
+                                }
+                            }
+                        }
+                    } else value = null
+                }
             }
 
             val isIconSynchronized = displayedInfo.appIconKey.trim() == readTextFile(File(context.filesDir, APP_ICON_KEY_FILE)).trim() && displayedInfo.appIconKey.isNotBlank()
@@ -397,7 +417,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 Spacer(GlanceModifier.size(16.dp))
                 // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
                 Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
-                    HistoryList(context, info.history, info.trackKey)
+                    HistoryList(context, info.history, info.sessionIdentity)
                     
                     // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
                     Box(
@@ -414,30 +434,30 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     @Composable
     private fun PlaybackStatusIndicator(info: MusicInfo, context: Context) {
         val status = getStatusText(context, info)
-        val isStatic = info.isPlaying || info.isSessionActive
+        val isFresh = isSessionFresh(info)
         Text(
-            text = if (isStatic) status.uppercase() else status,
-            style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(R.dimen.text_size_status), fontWeight = if (isStatic) FontWeight.Bold else FontWeight.Medium),
+            text = if (isFresh) status.uppercase() else status,
+            style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(R.dimen.text_size_status), fontWeight = if (isFresh) FontWeight.Bold else FontWeight.Medium),
             maxLines = 1
         )
     }
 
     @Composable
-    private fun HistoryList(context: Context, history: List<HistoryItem>, currentTrackKey: String) {
+    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String) {
         val historyHeaderTextSize = spDimen(R.dimen.text_size_history_header)
         val historyHeaderIconSize = dimen(R.dimen.history_header_icon_size)
         
-        // FILTRO DE REDUNDANCIA VISUAL:
+        // FILTRO DE REDUNDANCIA VISUAL (v8.0):
         // Ocultamos la canción que está sonando actualmente si ya existe en el historial.
-        // Esto reduce el ruido visual sin afectar la analítica ni la lógica de persistencia.
-        val filteredHistory = if (currentTrackKey.isNotBlank()) {
-            history.filter { it.trackKey != currentTrackKey }
+        // Usamos sessionIdentity para que sea inmune a refinamientos de duración o cambios de álbum.
+        val filteredHistory = if (currentSessionIdentity.isNotBlank()) {
+            history.filter { it.sessionIdentity != currentSessionIdentity }
         } else history
 
         // SKELETON HISTÓRICO: Si no hay datos (o quedaron vacíos tras el filtro), 
         // renderizamos tarjetas vacías para showcase (v1.8.4)
         val itemsToRender = if (filteredHistory.isEmpty()) {
-            List(4) { HistoryItem(title = "", artist = "", packageName = "", artworkPath = "", artworkKey = "", trackKey = "", timestamp = it.toLong()) }
+            List(4) { HistoryItem(title = "", artist = "", album = "", durationMs = 0L, packageName = "", artworkPath = "", artworkKey = "", trackKey = "", timestamp = it.toLong()) }
         } else filteredHistory
 
         Column(modifier = GlanceModifier.fillMaxSize()) {
@@ -480,9 +500,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val cacheKey = "hist_${item.trackKey}_${item.timestamp}"
         val bitmap = bitmapCache.get(cacheKey) ?: run {
             val file = File(item.artworkPath)
-            val expectedFileName = "art_${item.trackKey.hashCode()}.webp"
-            val isSynchronized = file.name == expectedFileName
-            val b = if (file.exists() && isSynchronized) decodeBitmap(file, reqWidth = 120, reqHeight = 80) else null
+            val b = if (file.exists()) decodeBitmap(file, reqWidth = 120, reqHeight = 80) else null
             if (b != null) bitmapCache.put(cacheKey, b); b
         }
         val searchIntent = android.content.Intent(context, PermissionsTrampolineActivity::class.java).apply { action = "arenliel.musicwidget.ACTION_SEARCH_PLAY"; putExtra("EXTRA_TITLE", item.title); putExtra("EXTRA_ARTIST", item.artist); data = Uri.parse("musicwidget://search/${item.title}/${item.artist}/${System.currentTimeMillis()}") }
@@ -627,9 +645,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
 
     @Composable
     private fun VisualizerSelector(context: Context, info: MusicInfo, size: Dp) {
+        val isFresh = isSessionFresh(info)
         when {
             info.isPlaying -> AndroidRemoteViews(remoteViews = RemoteViews(context.packageName, R.layout.layout_visualizer), modifier = GlanceModifier.size(size))
-            info.isSessionActive -> Image(provider = ImageProvider(R.drawable.ic_visualizer_paused), contentDescription = context.getString(R.string.content_desc_visualizer), modifier = GlanceModifier.size(size))
+            isFresh && info.isSessionActive -> Image(provider = ImageProvider(R.drawable.ic_visualizer_paused), contentDescription = context.getString(R.string.content_desc_visualizer), modifier = GlanceModifier.size(size))
             else -> Box(modifier = GlanceModifier.size(size).background(GlanceTheme.colors.widgetBackground).cornerRadius(size / 2), contentAlignment = Alignment.Center) { Image(provider = ImageProvider(R.drawable.ic_music_history), contentDescription = context.getString(R.string.content_desc_visualizer), modifier = GlanceModifier.size(size * 0.85f)) }
         }
     }
@@ -768,6 +787,15 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         }
     }
 
+    private fun isSessionFresh(info: MusicInfo): Boolean {
+        if (info.isPlaying) return true
+        if (!info.isSessionActive) return false
+        val now = System.currentTimeMillis()
+        val timeSinceLastUpdate = now - info.lastUpdateEpoch
+        val PAUSE_STALE_THRESHOLD = 15 * 60 * 1000L
+        return timeSinceLastUpdate < PAUSE_STALE_THRESHOLD
+    }
+
     private fun decodeBitmap(file: File, reqWidth: Int = 400, reqHeight: Int = 400): Bitmap? {
         if (!file.isFile || file.length() <= 0L) return null
         return runCatching {
@@ -790,7 +818,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
 @Preview(widthDp = 340, heightDp = 340)
 @Composable
 fun Selector_Control_Preview() {
-    GlanceTheme { MusicWidgetUIWithMock(appearance = WidgetAppearance.PILL_CONTROL, title = "MONACO", artist = "Bad Bunny", isPlaying = true, width = 340, height = 340, history = listOf(HistoryItem("TIKI TIKI", "QMIIR", "com.spotify.music", "path1", "ak1", "tk1", System.currentTimeMillis(), streakDays = 5), HistoryItem("NUEVAYOL", "Bad Bunny", "com.spotify.music", "path2", "ak2", "tk2", System.currentTimeMillis() - 10000, isSkipped = true, skipStreak = 3)), playsToday = 3) }
+    GlanceTheme { MusicWidgetUIWithMock(appearance = WidgetAppearance.PILL_CONTROL, title = "MONACO", artist = "Bad Bunny", isPlaying = true, width = 340, height = 340, history = listOf(HistoryItem("TIKI TIKI", "QMIIR", "Un Verano Sin Ti", 180000L, "com.spotify.music", "path1", "ak1", "tk1", System.currentTimeMillis(), streakDays = 5), HistoryItem("NUEVAYOL", "Bad Bunny", "Nadie Sabe", 210000L, "com.spotify.music", "path2", "ak2", "tk2", System.currentTimeMillis() - 10000, isSkipped = true, skipStreak = 3)), playsToday = 3) }
 }
 
 @OptIn(ExperimentalGlancePreviewApi::class)

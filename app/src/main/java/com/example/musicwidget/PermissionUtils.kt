@@ -142,7 +142,8 @@ object PermissionUtils {
                 AppItem(
                     name = pm.getApplicationLabel(appInfo).toString(),
                     packageName = pkg,
-                    icon = pm.getApplicationIcon(appInfo)
+                    icon = pm.getApplicationIcon(appInfo),
+                    isEnabled = appInfo.enabled
                 )
             }.getOrNull()
         }.toMutableList()
@@ -154,7 +155,8 @@ object PermissionUtils {
                     musicApps.add(AppItem(
                         name = pm.getApplicationLabel(appInfo).toString(),
                         packageName = pkg,
-                        icon = pm.getApplicationIcon(appInfo)
+                        icon = pm.getApplicationIcon(appInfo),
+                        isEnabled = appInfo.enabled
                     ))
                 }
             }

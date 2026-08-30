@@ -99,15 +99,21 @@ object MusicStateProvider {
     private fun reconcileEnd(current: MusicInfo, e: MusicUpdateEvent.SessionEnded): MusicInfo {
         return current.copy(
             isSessionActive = false,
-            isPlaying = false
+            isPlaying = false,
+            lastUpdateEpoch = System.currentTimeMillis()
         )
     }
     
     private fun reconcileStatus(current: MusicInfo, e: MusicUpdateEvent.StatusUpdate): MusicInfo {
+        val statusChanged = current.isPlaying != e.isPlaying || 
+                           current.playbackDeviceName != e.deviceName
+        
         return current.copy(
             isPlaying = e.isPlaying,
             playbackDeviceName = e.deviceName,
-            playbackDeviceType = e.deviceType
+            playbackDeviceType = e.deviceType,
+            lastUpdateEpoch = if (statusChanged) System.currentTimeMillis() else current.lastUpdateEpoch,
+            observedAtRealtime = if (statusChanged) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime
         )
     }
 

@@ -26,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -35,215 +36,283 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import java.io.File
 
 data class AppItem(
     val name: String,
     val packageName: String,
-    val icon: Drawable
+    val icon: Drawable,
+    val isEnabled: Boolean
 )
 
 @Composable
-fun RestrictedSettingsCard(onOpenInfo: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest), // Elevación máxima (v5.0)
-        shape = RoundedCornerShape(28.dp)
+fun SettingsItem(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    trailingIcon: ImageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight
+) {
+    Surface(
+        onClick = onClick,
+        color = Color.Transparent,
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.Top) {
-            Icon(
-                imageVector = Icons.Default.Info, 
-                contentDescription = null, 
-                tint = MaterialTheme.colorScheme.onSurface, 
-                modifier = Modifier.size(24.dp).padding(top = 2.dp)
-            )
+        Row(
+            modifier = Modifier
+                .padding(16.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            
             Spacer(modifier = Modifier.width(16.dp))
-            Column {
+            
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = stringResource(R.string.setup_restricted_title),
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Bold,
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = stringResource(R.string.setup_restricted_desc),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Button( // Botón sólido y claro como en la referencia
-                    onClick = onOpenInfo, 
-                    shape = RoundedCornerShape(28.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                if (subtitle.isNotEmpty()) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
-                ) {
-                    Text(stringResource(R.string.setup_restricted_button), style = MaterialTheme.typography.labelLarge)
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun BatteryOptimizationCard(isIgnoring: Boolean, onToggle: () -> Unit, shape: androidx.compose.ui.graphics.Shape) {
-    Card(
-        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 80.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest), 
-        shape = shape
-    ) {
-        Row(modifier = Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            
             Icon(
-                painter = painterResource(id = R.drawable.cached_24px), 
-                contentDescription = null, 
-                tint = MaterialTheme.colorScheme.onSurface, 
-                modifier = Modifier.size(32.dp)
-            )
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = stringResource(R.string.setup_battery_title), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                Text(text = stringResource(R.string.setup_battery_desc), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Switch(
-                checked = isIgnoring, 
-                onCheckedChange = { onToggle() },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = MaterialTheme.colorScheme.primary,
-                    checkedTrackColor = MaterialTheme.colorScheme.primaryContainer,
-                    uncheckedThumbColor = MaterialTheme.colorScheme.outline,
-                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest
-                )
+                imageVector = trailingIcon,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
             )
         }
     }
 }
 
 @Composable
-fun PermissionCard(isGranted: Boolean, onGrantClick: () -> Unit, shape: androidx.compose.ui.graphics.Shape) {
-    Card(
-        modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 80.dp), 
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest), 
-        shape = shape
+fun AppListContent(
+    apps: List<AppItem>,
+    blacklist: Set<String>,
+    onToggle: (String, Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(0.8f)
+            .padding(16.dp)
     ) {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    painter = painterResource(id = R.drawable.stock_media_24px), 
-                    contentDescription = null, 
-                    tint = MaterialTheme.colorScheme.onSurface, 
-                    modifier = Modifier.size(32.dp)
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                Text(text = stringResource(R.string.setup_notifications_title), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-            }
-            
-            Spacer(modifier = Modifier.height(12.dp))
-            
-            Text(
-                text = stringResource(R.string.setup_notifications_desc), 
-                style = MaterialTheme.typography.bodySmall, 
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 48.dp)
-            )
-            
-            if (!isGranted) {
-                Spacer(modifier = Modifier.height(16.dp))
-                Button( // Botón sólido y claro (v5.0)
-                    onClick = onGrantClick, 
-                    shape = RoundedCornerShape(28.dp),
-                    modifier = Modifier.padding(start = 48.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
+        Text(
+            text = stringResource(R.string.setup_whitelist_title),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            text = stringResource(R.string.setup_whitelist_desc),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 24.dp)
+        )
+        
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(apps) { app ->
+                val isBlocked = blacklist.contains(app.packageName)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggle(app.packageName, !isBlocked) }
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(stringResource(R.string.setup_notifications_button), style = MaterialTheme.typography.labelLarge)
+                    Image(
+                        bitmap = app.icon.toBitmap().asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = app.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = !isBlocked,
+                        onCheckedChange = { onToggle(app.packageName, !it) }
+                    )
                 }
             }
         }
-    }
-}
-
-@Composable
-fun SettingsItem(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
-    Surface(onClick = onClick, color = androidx.compose.ui.graphics.Color.Transparent, modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 72.dp)) {
-        Row(modifier = Modifier.padding(16.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
-                Icon(imageVector = icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(20.dp))
-            }
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(text = subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Icon(imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-fun AppListContent(apps: List<AppItem>, blacklist: Set<String>, onToggle: (String, Boolean) -> Unit) {
-    Column(modifier = Modifier.fillMaxWidth().fillMaxHeight(0.8f)) {
-        Text(text = stringResource(R.string.setup_whitelist_title), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), textAlign = TextAlign.Center)
-        Text(text = stringResource(R.string.setup_whitelist_desc), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 16.dp, start = 24.dp, end = 24.dp), textAlign = TextAlign.Center)
-        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
-        LazyColumn(modifier = Modifier.weight(1f)) {
-            items(apps) { app ->
-                val isSelected = !blacklist.contains(app.packageName)
-                BlacklistItem(app = app, isBlacklisted = !isSelected, onToggle = { checked -> onToggle(app.packageName, !checked) })
-            }
-        }
+        
         Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
 @Composable
-fun BlacklistItem(app: AppItem, isBlacklisted: Boolean, onToggle: (Boolean) -> Unit) {
-    val isSelected = !isBlacklisted
-    ListItem(
-        modifier = Modifier.clickable { onToggle(!isBlacklisted) },
-        headlineContent = { Text(text = app.name, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal) },
-        supportingContent = { Text(text = app.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingContent = { Image(bitmap = app.icon.toBitmap().asImageBitmap(), contentDescription = null, modifier = Modifier.size(40.dp).clip(CircleShape)) },
-        trailingContent = { Checkbox(checked = isSelected, onCheckedChange = { onToggle(!isSelected) }, colors = CheckboxDefaults.colors(checkedColor = MaterialTheme.colorScheme.primary)) },
-        colors = ListItemDefaults.colors(containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.1f) else androidx.compose.ui.graphics.Color.Transparent)
-    )
-}
-
-@Composable
 fun DiagnosticSheetContent(context: Context) {
-    var errorText by remember { mutableStateOf("No se han detectado errores recientes.") }
-    val scrollState = rememberScrollState()
-    LaunchedEffect(Unit) {
-        val file = File(context.filesDir, "widget_error.log")
-        if (file.exists()) errorText = file.readText()
+    val logs by InternalLogger.logsFlow.collectAsState()
+    val errorText = remember(logs) {
+        if (logs.isEmpty()) "No se han detectado eventos recientes." 
+        else logs.joinToString("\n")
     }
+    val scrollState = rememberScrollState()
+    
+    LaunchedEffect(Unit) {
+        InternalLogger.init(context)
+    }
+
     Column(modifier = Modifier.fillMaxWidth().fillMaxHeight(0.6f).padding(horizontal = 24.dp)) {
         Text(text = "Diagnóstico Técnico", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
         Spacer(modifier = Modifier.height(16.dp))
         Card(modifier = Modifier.weight(1f).fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)), shape = RoundedCornerShape(12.dp)) {
             Box(modifier = Modifier.padding(12.dp).verticalScroll(scrollState)) {
-                Text(text = errorText, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = if (errorText.contains("Error") && errorText.length > 50) TextAlign.Start else TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                Text(text = errorText, style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = if (logs.size > 2) TextAlign.Start else TextAlign.Center, modifier = Modifier.fillMaxWidth())
             }
         }
         Spacer(modifier = Modifier.height(24.dp))
         Row(modifier = Modifier.fillMaxWidth().padding(bottom = 32.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            val hasError = errorText.contains("Error") || errorText.length > 50
+            val hasLogs = logs.isNotEmpty()
             Button(onClick = {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                val clip = android.content.ClipData.newPlainText("Widget Error Log", errorText)
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("Widget Diagnostic Log", errorText)
                 clipboard.setPrimaryClip(clip)
                 Toast.makeText(context, "Log copiado al portapapeles", Toast.LENGTH_SHORT).show()
-            }, modifier = Modifier.weight(1f), enabled = hasError, shape = RoundedCornerShape(16.dp)) { Text("Copiar Log") }
+            }, modifier = Modifier.weight(1f), enabled = hasLogs, shape = RoundedCornerShape(16.dp)) { Text("Copiar Log") }
             OutlinedButton(onClick = {
-                val file = File(context.filesDir, "widget_error.log")
-                if (file.exists()) file.delete()
-                errorText = "Log limpiado con éxito."
+                InternalLogger.clear(context)
             }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(16.dp)) { Text("Limpiar") }
+        }
+    }
+}
+
+@Composable
+fun PermissionCard(
+    isGranted: Boolean,
+    onGrantClick: () -> Unit,
+    shape: RoundedCornerShape
+) {
+    Card(
+        onClick = onGrantClick,
+        colors = CardDefaults.cardColors(
+            containerColor = if (isGranted) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceContainerHigh
+        ),
+        shape = shape,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Warning,
+                contentDescription = null,
+                tint = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(
+                    text = stringResource(R.string.setup_notifications_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (isGranted) stringResource(R.string.setup_notifications_active) else stringResource(R.string.setup_notifications_inactive),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun BatteryOptimizationCard(
+    isIgnoring: Boolean,
+    onToggle: () -> Unit,
+    shape: RoundedCornerShape
+) {
+    Card(
+        onClick = onToggle,
+        colors = CardDefaults.cardColors(
+            containerColor = if (isIgnoring) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f) else MaterialTheme.colorScheme.surfaceContainerHigh
+        ),
+        shape = shape,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = if (isIgnoring) Icons.Default.CheckCircle else Icons.Default.Warning,
+                contentDescription = null,
+                tint = if (isIgnoring) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(
+                    text = stringResource(R.string.setup_battery_title),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (isIgnoring) stringResource(R.string.setup_battery_active) else stringResource(R.string.setup_battery_inactive),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun RestrictedSettingsCard(onOpenInfo: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)),
+        shape = RoundedCornerShape(28.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(text = stringResource(R.string.setup_restricted_title), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(text = stringResource(R.string.setup_restricted_desc), style = MaterialTheme.typography.bodySmall)
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = onOpenInfo,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text(stringResource(R.string.setup_restricted_button))
+            }
         }
     }
 }

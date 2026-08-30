@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -23,6 +24,7 @@ data class MusicInfo(
     val title: String,
     val artist: String,
     val packageName: String,
+    val album: String = "", // AGREGADO (Bloque B)
 
     /*
      * Identidad estable de la pista.
@@ -31,6 +33,12 @@ data class MusicInfo(
      * el mismo título y artista.
      */
     val trackKey: String = "",
+
+    /*
+     * Identificador único de la sesión (v5.2).
+     * Inmutable durante todo el ciclo de vida de la pista.
+     */
+    val sessionUUID: String = "",
 
     /*
      * Identidad de la portada actualmente asociada
@@ -134,8 +142,32 @@ data class MusicInfo(
     /*
      * Indica si el artista actual es considerado "Frecuente" (Corazón ❤️).
      */
-    val isFrequentArtist: Boolean = false
+    val isFrequentArtist: Boolean = false,
+
+    /*
+     * Indica si esta sesión fue interrumpida bruscamente (onSessionDestroyed)
+     * y está esperando una reconciliación o un cierre definitivo (v6.7).
+     */
+    val isPendingCommit: Boolean = false,
+
+    /*
+     * Último progreso máximo alcanzado antes de la interrupción.
+     */
+    val lastMaxPositionMs: Long = 0L,
+
+    /*
+     * Versión del esquema de identidad (v7.0).
+     * Permite migrar registros antiguos a la nueva sanitización.
+     */
+    val identitySchemaVersion: Int = 0
 ) {
+    /**
+     * Identidad de sesión (v8.0): Sanitizada y normalizada.
+     * Fuente de verdad para filtros de redundancia.
+     */
+    val sessionIdentity: String
+        get() = "$packageName|${HistoryItem.normalize(title)}|${HistoryItem.normalize(artist)}"
+
     /**
      * DETERMINISMO DE ESTADO: Indica si el widget está en una instalación fresca (v1.7.0).
      */
@@ -169,6 +201,8 @@ data class MusicInfo(
 data class HistoryItem(
     val title: String,
     val artist: String,
+    val album: String = "", // AGREGADO (Bloque B)
+    val durationMs: Long = 0L, // AGREGADO (Bloque B)
     val packageName: String,
     val artworkPath: String,
     val artworkKey: String,
@@ -179,8 +213,22 @@ data class HistoryItem(
     val playsToday: Int = 0,
     val streakDays: Int = 0,
     val artworkUri: String = "",
-    val hasPendingArtwork: Boolean = false
-)
+    val hasPendingArtwork: Boolean = false,
+    val identitySchemaVersion: Int = 0 // AGREGADO (Bloque B)
+) {
+    val sessionIdentity: String
+        get() = "$packageName|${normalize(title)}|${normalize(artist)}"
+
+    val canonicalTrackKey: String
+        get() = "$sessionIdentity|${normalize(album)}|$durationMs"
+
+    companion object {
+        fun normalize(text: String?): String {
+            if (text == null) return ""
+            return java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFC).trim().lowercase()
+        }
+    }
+}
 
 /**
  * Estadísticas de repetición persistidas por canción.
@@ -266,6 +314,29 @@ class MusicDataStore(
                 "app_icon_key"
             )
 
+        private val SESSION_UUID =
+            stringPreferencesKey(
+                "session_uuid"
+            )
+
+        private val IS_PENDING_COMMIT =
+            booleanPreferencesKey(
+                "is_pending_commit"
+            )
+
+        private val LAST_MAX_POSITION_MS =
+            longPreferencesKey(
+                "last_max_pos"
+            )
+
+        private val IDENTITY_SCHEMA_VERSION =
+            intPreferencesKey(
+                "identity_v"
+            )
+
+        private val ALBUM = stringPreferencesKey("album")
+        const val CURRENT_IDENTITY_VERSION = 2
+
         private val LAST_UPDATE_EPOCH =
             longPreferencesKey(
                 "last_update_epoch"
@@ -341,6 +412,12 @@ class MusicDataStore(
                 "artist_stats"
             )
 
+        /**
+         * REGLA F.1 (Orden v9): Control de reseteo masivo de rachas.
+         * Activarlo únicamente bajo confirmación del usuario para sanear conteos del Incidente K.
+         */
+        const val GLOBAL_SKIP_STREAK_RESET_ENABLED = false
+
         private const val DEFAULT_TITLE =
             ""
 
@@ -387,6 +464,10 @@ class MusicDataStore(
                     prefs[APP_ICON_KEY]
                         .orEmpty(),
 
+                sessionUUID =
+                    prefs[SESSION_UUID]
+                        .orEmpty(),
+
                 lastUpdateEpoch =
                     prefs[LAST_UPDATE_EPOCH]
                         ?: 0L,
@@ -427,11 +508,17 @@ class MusicDataStore(
                     prefs[PLAYBACK_DEVICE_TYPE]
                         ?: 0,
 
-                durationMs =
-                    prefs[DURATION_MS]
-                        ?: 0L,
-
-                history = decodeHistory(prefs[HISTORY].orEmpty()),
+                durationMs = prefs[DURATION_MS] ?: 0L,
+                album = prefs[ALBUM].orEmpty(),
+                isPendingCommit = prefs[IS_PENDING_COMMIT] ?: false,
+                lastMaxPositionMs = prefs[LAST_MAX_POSITION_MS] ?: 0L,
+                identitySchemaVersion = prefs[IDENTITY_SCHEMA_VERSION] ?: 0,
+                history = run {
+                    val rawHistory = decodeHistory(prefs[HISTORY].orEmpty())
+                    if (GLOBAL_SKIP_STREAK_RESET_ENABLED) {
+                        rawHistory.map { it.copy(skipStreak = 0) }
+                    } else rawHistory
+                },
 
                 playsToday = run {
                     val title = prefs[TITLE] ?: ""
@@ -516,14 +603,17 @@ class MusicDataStore(
             val array = JSONArray(json)
             List(array.length()) { i ->
                 val obj = array.getJSONObject(i)
-                HistoryItem(
+                val item = HistoryItem(
                     title = obj.getString("t"),
                     artist = obj.getString("a"),
                     packageName = obj.optString("p", ""),
                     artworkPath = obj.optString("ap", ""),
                     artworkKey = obj.optString("ak", obj.optString("k", "")),
                     trackKey = obj.optString("tk", ""),
+                    album = obj.optString("al", ""),
+                    durationMs = obj.optLong("dm", 0L),
                     timestamp = obj.getLong("ts"),
+                    identitySchemaVersion = obj.optInt("v", 0),
                     isSkipped = obj.optBoolean("sk", false),
                     skipStreak = obj.optInt("ss", 0),
                     playsToday = obj.optInt("pt", 0),
@@ -531,6 +621,16 @@ class MusicDataStore(
                     artworkUri = obj.optString("au", ""),
                     hasPendingArtwork = obj.optBoolean("pa", false)
                 )
+
+                // MIGRACIÓN v8.0 (Bloque B.6): Normalización retroactiva
+                if (item.identitySchemaVersion < CURRENT_IDENTITY_VERSION) {
+                    item.copy(
+                        trackKey = item.canonicalTrackKey,
+                        identitySchemaVersion = CURRENT_IDENTITY_VERSION
+                    )
+                } else {
+                    item
+                }
             }
         } catch (e: Exception) {
             emptyList()
@@ -547,7 +647,10 @@ class MusicDataStore(
             obj.put("ap", item.artworkPath)
             obj.put("ak", item.artworkKey)
             obj.put("tk", item.trackKey)
+            obj.put("al", item.album)
+            obj.put("dm", item.durationMs)
             obj.put("ts", item.timestamp)
+            obj.put("v", item.identitySchemaVersion)
             obj.put("sk", item.isSkipped)
             obj.put("ss", item.skipStreak)
             obj.put("pt", item.playsToday)
@@ -679,11 +782,16 @@ class MusicDataStore(
             prefs[ARTIST] = info.artist
             prefs[PACKAGE_NAME] = info.packageName
             prefs[TRACK_KEY] = info.trackKey
+            prefs[SESSION_UUID] = info.sessionUUID
             prefs[ARTWORK_KEY] = info.artworkKey
             prefs[ARTWORK_URI] = info.artworkUri
             prefs[APP_ICON_KEY] = info.appIconKey
             prefs[IS_PLAYING] = info.isPlaying
             prefs[IS_SESSION_ACTIVE] = info.isSessionActive
+            prefs[IS_PENDING_COMMIT] = info.isPendingCommit
+            prefs[LAST_MAX_POSITION_MS] = info.lastMaxPositionMs
+            prefs[IDENTITY_SCHEMA_VERSION] = CURRENT_IDENTITY_VERSION
+            prefs[ALBUM] = info.album
             prefs[CURRENT_LYRIC] = info.currentLyric
             prefs[LYRICS_TRACK_KEY] = info.lyricsTrackKey
             prefs[SHOW_LYRICS] = info.showLyrics
@@ -695,10 +803,11 @@ class MusicDataStore(
              * lastUpdateEpoch representa una actualización real de la sesión (Epoch).
              * observedAtRealtime representa el anclaje monotónico.
              *
-             * REGLA v4.7: forceUpdate NO resetea el reloj (solo sirve para emitir datos visuales).
-             * El reloj solo se mueve si la identidad cambió o si pasamos a PLAYING.
+             * REGLA v6.6: Reseteamos el reloj ante cambios de identidad O cambios de estado 
+             * de reproducción (incluyendo el paso a PAUSA) para que el umbral de 15 min 
+             * cuente desde el momento exacto de la inactividad.
              */
-            val shouldResetClock = identityChanged || (playbackStatusChanged && info.isPlaying)
+            val shouldResetClock = identityChanged || playbackStatusChanged
 
             if (shouldResetClock) {
                 prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()
@@ -717,9 +826,9 @@ class MusicDataStore(
             val currentHistoryJson = prefs[HISTORY].orEmpty()
             val oldHistory = decodeHistory(currentHistoryJson)
 
-            // 1. Buscar coincidencia previa para Validar Inmunidad
+            // 1. Buscar coincidencia previa usando sessionIdentity (Bloque C.2)
             val existingItem = oldHistory.find {
-                it.title == item.title && it.artist == item.artist
+                it.sessionIdentity == item.sessionIdentity
             }
 
             if (existingItem != null) {
@@ -735,9 +844,9 @@ class MusicDataStore(
                 item
             }
 
-            // 3. Filtrar coincidencia previa para mover a la cima (LRU)
+            // 3. Filtrar coincidencia previa para mover a la cima (LRU) - Usar sessionIdentity
             val listWithoutDuplicate = oldHistory.filterNot {
-                it.title == item.title && it.artist == item.artist
+                it.sessionIdentity == item.sessionIdentity
             }
 
             // 4. Insertar al principio y limitar a los últimos 10
@@ -791,7 +900,7 @@ class MusicDataStore(
      * Actualiza y persiste la racha de skips para una canción.
      * @return La racha actualizada.
      */
-    suspend fun updateSkipStreak(title: String, artist: String, isSkip: Boolean, isPartial: Boolean): Int {
+    suspend fun updateSkipStreak(title: String, artist: String, isSkip: Boolean): Int {
         var newStreak = 0
         context.dataStore.edit { prefs ->
             val json = prefs[SKIP_STREAKS].orEmpty()
@@ -808,8 +917,7 @@ class MusicDataStore(
 
             newStreak = when {
                 isSkip -> currentStreak + 1
-                isPartial -> 0
-                else -> 0 // Completada
+                else -> 0 // Completada o Parcial: Resetear perdón
             }
 
             if (newStreak > 0) {

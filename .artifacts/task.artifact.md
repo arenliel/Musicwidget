@@ -1,0 +1,22 @@
+# Task List — Order v9
+
+- `[x]` **BLOQUE A — BLOQUEANTE: sello de build**
+    - `[x]` Corregir `buildConfigField` en `build.gradle.kts`.
+    - `[x]` Derivar `BUILD_TIME` de git.
+- `[x]` **BLOQUE B — Cadena de custodia de la portada (caso "hotline.")**
+    - `[x]` Eliminar limpieza de buffer en `onCreate`.
+    - `[x]` Escritura directa a `history/art_{uuid}.webp`.
+    - `[x]` Pasar `sessionUUID` como parámetro (Regla 11).
+    - `[x]` Corregir detector `HIST_POISON`.
+- `[x]` **BLOQUE C — Completar la unificación de nombres (regla 10)**
+    - `[x]` Unificar todos los puntos de escritura a UUID.
+    - `[x]` Auditar archivos huérfanos.
+- `[x]` **BLOQUE D — Monotonía de la marca de agua**
+    - `[x]` Invariante monótona en `LogicalSession`.
+    - `[x]` Ignorar rebobinado al arranque.
+- `[x]` **BLOQUE E — updateAll y Screen-Gated Rendering**
+    - `[x]` Condicionar `updateAll` a visibilidad.
+- `[x]` **BLOQUE F — Menores y decisión pendiente**
+    - `[x]` Implementar reseteo de `skipStreak` (desactivado).
+- `[/]` **BLOQUE G — Validación**
+    - `[ ]` Ejecutar V7-bis a V17.
