@@ -162,16 +162,15 @@ data class MusicInfo(
     val identitySchemaVersion: Int = 0
 ) {
     /**
-     * Identidad de sesión (v8.0): Sanitizada y normalizada.
-     * Fuente de verdad para filtros de redundancia.
-     */
-    val sessionIdentity: String
-        get() = "$packageName|${HistoryItem.normalize(title)}|${HistoryItem.normalize(artist)}"
-
-    /**
      * DETERMINISMO DE ESTADO: Indica si el widget está en una instalación fresca (v1.7.0).
      */
     val isEmpty: Boolean get() = trackKey.isBlank()
+
+    /**
+     * Identidad de sesión (v9.0): Centralizada.
+     */
+    val sessionIdentity: String
+        get() = MusicDataStore.computeSessionIdentity(packageName, title, artist)
 
     /**
      * MOTOR DE PRESENTACIÓN (v2.2): Transforma el estado interno en el estado visual para el widget.
@@ -216,18 +215,18 @@ data class HistoryItem(
     val hasPendingArtwork: Boolean = false,
     val identitySchemaVersion: Int = 0 // AGREGADO (Bloque B)
 ) {
+    /**
+     * Identidad de sesión (v9.0): Centralizada y normalizada.
+     * Fuente de verdad para filtros de redundancia y LRU.
+     */
     val sessionIdentity: String
-        get() = "$packageName|${normalize(title)}|${normalize(artist)}"
+        get() = MusicDataStore.computeSessionIdentity(packageName, title, artist)
 
+    /**
+     * Identidad lógica de la pista para reconstrucción.
+     */
     val canonicalTrackKey: String
-        get() = "$sessionIdentity|${normalize(album)}|$durationMs"
-
-    companion object {
-        fun normalize(text: String?): String {
-            if (text == null) return ""
-            return java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFC).trim().lowercase()
-        }
-    }
+        get() = "$sessionIdentity|${MusicDataStore.normalize(album)}|$durationMs"
 }
 
 /**
@@ -417,6 +416,21 @@ class MusicDataStore(
          * Activarlo únicamente bajo confirmación del usuario para sanear conteos del Incidente K.
          */
         const val GLOBAL_SKIP_STREAK_RESET_ENABLED = false
+
+        /**
+         * Función canónica de normalización Unicode NFC (v9.0).
+         */
+        fun normalize(text: String?): String {
+            if (text == null) return ""
+            return java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFC).trim().lowercase()
+        }
+
+        /**
+         * Generador de identidad de sesión único para todo el proyecto (v9.0).
+         */
+        fun computeSessionIdentity(packageName: String, title: String, artist: String): String {
+            return "$packageName|${normalize(title)}|${normalize(artist)}"
+        }
 
         private const val DEFAULT_TITLE =
             ""

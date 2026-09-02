@@ -281,6 +281,7 @@ class MusicNotificationListener : NotificationListenerService() {
             val sessionUUID: String,
             val birthSnapshot: MediaSnapshot,
             val finalSnapshot: MediaSnapshot,
+            val maxPositionMs: Long,
             val startedAtRealtime: Long
         ) : HistoryEvent()
     }
@@ -418,11 +419,6 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     /*
-     * Último título enviado a la preview para evitar duplicados innecesarios.
-     */
-    private var lastPreviewTitle: String? = null
-
-    /*
      * Marca de tiempo de la última publicación de preview.
      * Android 15 limita esta API a ~2 veces por hora.
      */
@@ -475,22 +471,21 @@ class MusicNotificationListener : NotificationListenerService() {
         val recordedAt: Long = System.currentTimeMillis(),
         val artworkSource: ArtworkSource = ArtworkSource.Placeholder,
         val firstObservedAt: Long = recordedAt,
-        val maxPositionMs: Long = positionMs,
         val observedAtRealtime: Long = SystemClock.elapsedRealtime(),
         val playbackDeviceType: Int = AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
     ) {
         /*
-         * Identidad de sesión (v8.0: Normalización Unicode NFC + Sanitización Única).
+         * Identidad de sesión (v9.0): Centralizada en MusicDataStore.
          */
         val sessionIdentity: String
-            get() = "$packageName|${HistoryItem.normalize(title)}|${HistoryItem.normalize(artist)}"
+            get() = MusicDataStore.computeSessionIdentity(packageName, title, artist)
 
         /*
          * Identidad lógica de la pista (Hash robusto para assets/disco).
-         * v8.0: Álbum normalizado.
+         * v9.0: Normalización centralizada.
          */
         val trackKey: String
-            get() = "$sessionIdentity|${HistoryItem.normalize(album)}|$durationMs"
+            get() = "$sessionIdentity|${MusicDataStore.normalize(album)}|$durationMs"
 
         /*
          * Identidad del artwork.
@@ -504,11 +499,10 @@ class MusicNotificationListener : NotificationListenerService() {
                     ?: trackKey
 
         /*
-         * Identidad base de contenido (v5.2.3).
-         * Inmune a refinamientos de álbum/duración.
+         * Identidad base de contenido (v9.0).
          */
         val coreKey: String
-            get() = "${HistoryItem.normalize(title)}|${HistoryItem.normalize(artist)}"
+            get() = "${MusicDataStore.normalize(title)}|${MusicDataStore.normalize(artist)}"
 
         /*
          * Identidad completa del snapshot.
@@ -516,18 +510,20 @@ class MusicNotificationListener : NotificationListenerService() {
          */
         val contentKey: String
             get() = "$trackKey|$artworkKey|$playbackState|${projectedPositionMs() / 1000}"
+
+        /** 
+         * ORÁCULO DE TIEMPO PURO (v9.0): Proyecta la posición basado en el tiempo transcurrido.
+         * No conserva estado de marca de agua (Regla D.4).
+         */
         fun projectedPositionMs(
             nowRealtime: Long = SystemClock.elapsedRealtime()
         ): Long {
-            if (playbackState != PlaybackState.STATE_PLAYING) return maxPositionMs
+            if (playbackState != PlaybackState.STATE_PLAYING) return positionMs
             val delta = nowRealtime - observedAtRealtime
             val projected = positionMs + delta
             
-            // Watermark (maxPositionMs) para evitar retrocesos accidentales
-            val progress = max(maxPositionMs, projected)
-            
-            return if (durationMs > 0) progress.coerceIn(0L, durationMs)
-            else progress.coerceAtLeast(0L)
+            return if (durationMs > 0) projected.coerceIn(0L, durationMs)
+            else projected.coerceAtLeast(0L)
         }
 
         companion object {
@@ -545,7 +541,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     playbackDeviceName = info.playbackDeviceName,
                     playbackDeviceType = info.playbackDeviceType,
                     durationMs = info.durationMs,
-                    maxPositionMs = info.lastMaxPositionMs,
+                    positionMs = info.lastMaxPositionMs, // Usar el último récord como base al boot
                     observedAtRealtime = SystemClock.elapsedRealtime()
                 )
             }
@@ -558,7 +554,7 @@ class MusicNotificationListener : NotificationListenerService() {
         
         InternalLogger.log(this, "[BUILD_ID] " +
             "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) " +
-            "sha=${BuildConfig.GIT_SHA}+v8.0 built=${BuildConfig.BUILD_TIME}")
+            "sha=${BuildConfig.GIT_SHA} built=${BuildConfig.BUILD_TIME}")
 
         InternalLogger.d(this, "SERVICE_LIFECYCLE: onCreate - Process started")
 
@@ -574,7 +570,6 @@ class MusicNotificationListener : NotificationListenerService() {
 
         lyricsRepository = LyricsRepository(applicationContext)
 
-        cleanupHistoryBuffer()
         restoreIdempotencyShield()
         startHistoryWorker()
         startSeekEventProcessor()
@@ -726,20 +721,17 @@ class MusicNotificationListener : NotificationListenerService() {
                             when (event) {
                                 is HistoryEvent.CommitSession -> {
                                     val durationObserved = android.os.SystemClock.elapsedRealtime() - event.startedAtRealtime
-                                    val finalPos = event.finalSnapshot.projectedPositionMs()
                                     
                                     InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] EVENT_RECEIVED: ${event.finalSnapshot.title} (UUID=${event.sessionUUID}, Observado=${durationObserved}ms)")
 
                                     // BLOQUEO DE SESIONES FANTASMA
                                     if (durationObserved <= 1000L) {
                                         InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] Sesión fantasma bloqueada.")
-                                        cleanupBuffer(event.sessionUUID)
-                                    } else if (durationObserved >= 5000L || finalPos >= 5000L) {
-                                        commitToHistory(event.sessionUUID, event.birthSnapshot, event.finalSnapshot)
+                                    } else if (durationObserved >= 5000L || event.maxPositionMs >= 5000L) {
+                                        commitToHistory(event.sessionUUID, event.birthSnapshot, event.finalSnapshot, event.maxPositionMs)
                                         InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] EVENT_PERSISTED: ${event.finalSnapshot.title}")
                                     } else {
                                         InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] Pista descartada por corta.")
-                                        cleanupBuffer(event.sessionUUID)
                                     }
                                 }
                             }
@@ -762,19 +754,9 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
-    private fun saveBitmapToBuffer() {
-        // v9.0: Eliminado (Bloque B.2).
-    }
 
-    private fun cleanupBuffer(sessionUUID: String) {
-        // v9.0: Eliminado (Bloque B.2).
-    }
 
-    private fun cleanupHistoryBuffer() {
-        // v9.0: Eliminado (Bloque B.2). Ahora escribimos directamente a /history/.
-    }
-
-    private suspend fun commitToHistory(sessionUUID: String, startSnapshot: MediaSnapshot, endSnapshot: MediaSnapshot) {
+    private suspend fun commitToHistory(sessionUUID: String, startSnapshot: MediaSnapshot, endSnapshot: MediaSnapshot, maxPositionMs: Long) {
         try {
             val historyDir = File(filesDir, "history")
             if (!historyDir.exists()) historyDir.mkdirs()
@@ -825,7 +807,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
             val hasArtwork = artworkFile.exists()
             // v9.0: Usar marca de agua rehidratada/persistente para clasificación (Bloque D)
-            val finalPos = currentLogicalSession?.maxPositionMs ?: endSnapshot.projectedPositionMs()
+            val finalPos = maxPositionMs
             
             // CASCADA DE DURACIÓN (v9.0: Blindaje contra valores <= 0)
             val effectiveDuration = when {
@@ -898,7 +880,8 @@ class MusicNotificationListener : NotificationListenerService() {
                 InternalLogger.d(applicationContext, "[GATING] Commit de historial con pantalla apagada. Postergando refresco.")
             }
             
-            cleanupHistoryFiles()
+            // v9.0: HIST_REAPER (Bloque Q1)
+            cleanupOrphanedArtworks()
 
         } catch (e: Exception) {
             Log.e(TAG, "Error en commitToHistory para ${startSnapshot.title}", e)
@@ -906,21 +889,59 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
 
-    private suspend fun cleanupHistoryFiles() {
-        try {
-            val historyDir = File(filesDir, "history")
-            if (!historyDir.exists()) return
+    /**
+     * HIST_REAPER (v9.0): Recolector de portadas huérfanas por referencia.
+     * Protege el historial vigente y la sesión activa (Regla Q1.2).
+     */
+    private suspend fun cleanupOrphanedArtworks() {
+        withContext(Dispatchers.IO) {
+            try {
+                val historyDir = File(filesDir, "history")
+                if (!historyDir.exists()) return@withContext
 
-            val currentHistory = musicDataStore.musicInfoFlow.first().history
-            val validFiles = currentHistory.map { File(it.artworkPath).name }.toSet()
-
-            historyDir.listFiles()?.forEach { file ->
-                if (file.name.startsWith("art_") && !validFiles.contains(file.name)) {
-                    file.delete()
+                val currentInfo = musicDataStore.musicInfoFlow.first()
+                
+                // 1. Construir conjunto de UUIDs protegidos
+                val protectedUUIDs = mutableSetOf<String>()
+                
+                // - Del historial
+                currentInfo.history.forEach { item ->
+                    val uuid = item.artworkPath.substringAfter("art_").substringBefore(".webp")
+                    if (uuid.length > 5) protectedUUIDs.add(uuid)
                 }
+                
+                // - De la sesión activa (Now Playing)
+                currentLogicalSession?.let { protectedUUIDs.add(it.sessionUUID) }
+                
+                // - Del limbo (Rehidratación pendiente)
+                if (currentInfo.sessionUUID.isNotEmpty()) protectedUUIDs.add(currentInfo.sessionUUID)
+
+                var examined = 0
+                var deleted = 0
+                var freedBytes = 0L
+
+                historyDir.listFiles()?.forEach { file ->
+                    if (file.name.startsWith("art_") && file.name.endsWith(".webp")) {
+                        examined++
+                        val fileName = file.name
+                        val fileUUID = fileName.substringAfter("art_").substringBefore(".webp")
+                        
+                        // Si no está protegido (o es un hash antiguo de < v8.0), borrar
+                        val isHashOldScheme = fileUUID.all { it.isDigit() || it == '-' } && fileUUID.length < 20
+                        
+                        if (!protectedUUIDs.contains(fileUUID) || isHashOldScheme) {
+                            freedBytes += file.length()
+                            if (file.delete()) deleted++
+                        }
+                    }
+                }
+                
+                InternalLogger.d(applicationContext, "[HIST_REAPER] Escaneo completado: " +
+                    "Examinados=$examined, Protegidos=${protectedUUIDs.size}, Borrados=$deleted, Liberado=${freedBytes/1024}KB")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error en HIST_REAPER", e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error limpiando archivos de historial", e)
         }
     }
 
@@ -929,7 +950,7 @@ class MusicNotificationListener : NotificationListenerService() {
      * Sanea portadas pendientes cuando el widget vuelve a ser visible.
      */
     /**
-     * EAGER CACHING (v4.4): Persistencia proactiva de la portada.
+     * EAGER CACHING (v9.0): Persistencia proactiva de la portada directamente a ruta final.
      * FASE B: Evaluación de Permanencia (Segundo 5).
      */
     private suspend fun persistHistoryArtworkEagerly(snapshot: MediaSnapshot, sessionUUID: String) {
@@ -1003,7 +1024,6 @@ class MusicNotificationListener : NotificationListenerService() {
             }
         }
     }
-
     private suspend fun reconcilePendingHistoryArtworks() {
         // Obtenemos el historial actual de la RAM
         val history = MusicStateProvider.current().history
@@ -1013,12 +1033,14 @@ class MusicNotificationListener : NotificationListenerService() {
         Log.d(TAG, "[CATCH-UP] Iniciando reconciliación de ${pending.size} portadas.")
 
         pending.forEach { item ->
-            val historyDir = File(filesDir, "history")
             val artworkFile = File(item.artworkPath)
             val tempFile = File("${item.artworkPath}.tmp")
             
             // v9.0: Extraer sessionUUID desde el path para logging (Regla 11: No copiar UUID)
             val sessionUUID = artworkFile.name.substringAfter("art_").substringBefore(".webp")
+            InternalLogger.d(applicationContext, "[CATCH-UP] Reconciliando portada (UUID=$sessionUUID)")
+
+            // Intentar resolución usando URI almacenada
             val bitmap = if (item.artworkUri.isNotBlank()) {
                 decodeAlbumArtUri(item.artworkUri)
             } else {
@@ -1765,7 +1787,6 @@ class MusicNotificationListener : NotificationListenerService() {
             positionMs = position,
             recordedAt = System.currentTimeMillis(),
             artworkSource = ArtworkSource.Placeholder,
-            maxPositionMs = position,
             observedAtRealtime = SystemClock.elapsedRealtime()
         )
     }
@@ -1867,11 +1888,11 @@ class MusicNotificationListener : NotificationListenerService() {
         reason: String
     ) {
         // v8.0: Bloqueo proactivo hasta que la rehidratación termine (BLOQUE A)
-        withTimeoutOrNull(BOOT_GATE_TIMEOUT_MS) { bootGate.await() }
+        kotlinx.coroutines.withTimeoutOrNull(BOOT_GATE_TIMEOUT_MS) { bootGate.await() }
             ?: InternalLogger.w(applicationContext, "[HIST_BOOT] BOOT_GATE_TIMEOUT: procesando paquete vivo ($reason) sin estado rehidratado")
 
         val session = currentLogicalSession
-
+        
         val stateName = when(rawSnapshot.playbackState) {
             PlaybackState.STATE_PLAYING -> "PLAYING"
             PlaybackState.STATE_PAUSED -> "PAUSED"
@@ -1982,11 +2003,6 @@ class MusicNotificationListener : NotificationListenerService() {
 
         val snapshot = rawSnapshot.copy(
             firstObservedAt = firstObservedAt,
-            maxPositionMs = if (canInheritAssets) {
-                max(session?.maxPositionMs ?: 0L, rawSnapshot.positionMs)
-            } else {
-                rawSnapshot.positionMs
-            },
             artworkSource = if (canInheritAssets) (session?.birthSnapshot?.artworkSource ?: rawSnapshot.artworkSource) else rawSnapshot.artworkSource
         )
 
@@ -2045,6 +2061,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     sessionUUID = session.sessionUUID,
                     birthSnapshot = session.birthSnapshot,
                     finalSnapshot = session.liveSnapshot,
+                    maxPositionMs = session.maxPositionMs,
                     startedAtRealtime = session.startedAtRealtime
                 ))
                 InternalLogger.d(applicationContext, "[HIST_BOOT] CIERRE RETROACTIVO: uuid=${session.sessionUUID}")
@@ -2063,6 +2080,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     sessionUUID = session.sessionUUID,
                     birthSnapshot = session.birthSnapshot,
                     finalSnapshot = session.liveSnapshot,
+                    maxPositionMs = session.maxPositionMs,
                     startedAtRealtime = session.startedAtRealtime
                 )
                 
@@ -2179,6 +2197,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     title = snapshot.title,
                     artist = snapshot.artist,
                     packageName = snapshot.packageName,
+                    album = snapshot.album ?: "",
                     trackKey = session?.frozenTrackKey ?: snapshot.trackKey, // Usar identidad física congelada (v6.5)
                     artworkKey = currentInfo.artworkKey,
                     artworkUri = snapshot.artworkUri ?: currentInfo.artworkUri,
@@ -2198,7 +2217,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     observedAtRealtime = currentMem.observedAtRealtime,
                     sessionUUID = session?.sessionUUID ?: "",
                     isPendingCommit = false,
-                    lastMaxPositionMs = snapshot.maxPositionMs
+                    lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs
                 )
                 
                 val event = if (isSessionEnded) {
@@ -2249,7 +2268,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     durationMs = snapshot.durationMs,
                     sessionUUID = session?.sessionUUID ?: "",
                     isPendingCommit = false, // Reconciliación exitosa (v6.7)
-                    lastMaxPositionMs = snapshot.maxPositionMs
+                    lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs
                 )
                 val changed = musicDataStore.saveMusicInfo(logicalMusicInfo, forceUpdate = false)
                 if (changed) {
@@ -2454,6 +2473,7 @@ class MusicNotificationListener : NotificationListenerService() {
                         title = snapshot.title,
                         artist = snapshot.artist,
                         packageName = snapshot.packageName,
+                        album = snapshot.album ?: "",
                         trackKey = session?.frozenTrackKey ?: snapshot.trackKey, // Usar identidad física congelada (v6.5)
                         artworkKey = snapshot.artworkKey,
                         artworkUri = snapshot.artworkUri ?: "",
@@ -2471,7 +2491,7 @@ class MusicNotificationListener : NotificationListenerService() {
                         isFrequentArtist = isFrequent,
                         sessionUUID = session?.sessionUUID ?: "",
                         isPendingCommit = false,
-                        lastMaxPositionMs = snapshot.maxPositionMs
+                        lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs
                     )
 
                     // 1. Sincronía Atómica: Disco -> RAM -> UI
@@ -2484,25 +2504,6 @@ class MusicNotificationListener : NotificationListenerService() {
                     // Hallazgo v3.9: Warm-up de RAM ya inyectado en bitmapCache
                     // REGLA DE ORO (v4.0): El Árbitro reconcilia el commit de disco
                     val changedRAM = MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(finalMusicInfo))
-
-                    if (Build.VERSION.SDK_INT >= 35 && snapshot.playbackState == PlaybackState.STATE_PLAYING) {
-                        val now = System.currentTimeMillis()
-                        val titleChanged = snapshot.title != lastPreviewTitle
-                        if (titleChanged && (now - lastPreviewUpdate > 20 * 60 * 1000L)) {
-                            lastPreviewUpdate = now
-                            lastPreviewTitle = snapshot.title
-                            serviceScope.launch {
-                                try {
-                                    val manager = GlanceAppWidgetManager(applicationContext)
-                                    manager.setWidgetPreviews(MusicWidgetFullReceiver::class)
-                                    manager.setWidgetPreviews(MusicWidgetPillReceiver::class)
-                                    manager.setWidgetPreviews(MusicWidgetControlReceiver::class)
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Fallo al publicar preview", e)
-                                }
-                            }
-                        }
-                    }
 
                     // PROMOCIÓN DE IDENTIDAD (v2.8): Ahora que el disco tiene la imagen y la llave,
                     // sincronizamos la RAM al 100% para mostrar el nuevo artwork.

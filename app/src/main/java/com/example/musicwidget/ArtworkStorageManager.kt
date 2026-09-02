@@ -18,13 +18,14 @@ object ArtworkStorageManager {
 
     /**
      * Guarda una portada para el historial de forma permanente y atómica.
+     * @param identifier El sessionUUID de la sesión (v9.0).
      * @return Ruta absoluta del archivo guardado.
      */
-    fun saveHistoryArtwork(context: Context, bitmap: Bitmap, trackKey: String): String {
+    fun saveHistoryArtwork(context: Context, bitmap: Bitmap, identifier: String): String {
         val historyDir = File(context.filesDir, "history")
         if (!historyDir.exists()) historyDir.mkdirs()
 
-        val fileName = "art_${trackKey.hashCode()}.webp"
+        val fileName = "art_$identifier.webp"
         val finalFile = File(historyDir, fileName)
         val tempFile = File(historyDir, "$fileName.tmp")
 
@@ -46,7 +47,7 @@ object ArtworkStorageManager {
                         StandardCopyOption.REPLACE_EXISTING, 
                         StandardCopyOption.ATOMIC_MOVE
                     )
-                    Log.d(TAG, "[HISTORY_ART] Guardando imagen de historial en disco para: $trackKey -> Path: ${finalFile.absolutePath}")
+                    Log.d(TAG, "[HISTORY_ART] Guardando imagen de historial en disco para: $identifier -> Path: ${finalFile.absolutePath}")
                 }
             }
         } catch (e: Exception) {
