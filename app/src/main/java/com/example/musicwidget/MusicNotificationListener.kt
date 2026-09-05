@@ -270,6 +270,7 @@ class MusicNotificationListener : NotificationListenerService() {
      */
     private var lastProcessedTrack: String? = null
     private var lastProcessedOutcome: String? = null
+    private var lastProcessedSessionUUID: String? = null
 
     /*
      * MONOTONIC GUARD (v4.5): Rastrea el progreso para detectar bucles (loops).
@@ -841,9 +842,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 else -> "COMPLETED"
             }
 
-            if (trackKey == lastProcessedTrack && outcome == lastProcessedOutcome) return
+            if (trackKey == lastProcessedTrack && outcome == lastProcessedOutcome && sessionUUID == lastProcessedSessionUUID) return
             lastProcessedTrack = trackKey
             lastProcessedOutcome = outcome
+            lastProcessedSessionUUID = sessionUUID
 
             val newStreak = musicDataStore.updateSkipStreak(startSnapshot.title, startSnapshot.artist, isSkipped)
             val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, isSkipped)
