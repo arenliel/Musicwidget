@@ -1909,7 +1909,7 @@ class MusicNotificationListener : NotificationListenerService() {
         // abortamos para proteger el estado coherente en RAM y Disco.
         val isLatent = rawSnapshot.playbackState != PlaybackState.STATE_PLAYING || !rawSnapshot.isSessionActive
         val isBaseIdentityMatch = rawSnapshot.title == currentMem.title && rawSnapshot.artist == currentMem.artist
-        val isDegraded = rawSnapshot.album.isNullOrBlank() || rawSnapshot.durationMs <= 0L
+        val isDegraded = rawSnapshot.durationMs <= 0L
 
         if (isLatent && isBaseIdentityMatch && isDegraded && !currentMem.isEmpty) {
             InternalLogger.w(applicationContext, "[DIAG_V5] [GATEKEEPER] Abortando flujo. Razón: Paquete degradado. Album=${rawSnapshot.album}, Duración=${rawSnapshot.durationMs}")
