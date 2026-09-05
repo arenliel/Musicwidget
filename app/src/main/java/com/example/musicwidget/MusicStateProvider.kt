@@ -74,7 +74,8 @@ object MusicStateProvider {
         return current.copy(
             trackKey = e.newTrackKey,
             artworkKey = e.newArtworkKey,
-            durationMs = e.newDuration
+            durationMs = e.newDuration,
+            isPlaying = e.isPlaying
         )
     }
 
@@ -122,7 +123,7 @@ object MusicStateProvider {
 
 sealed class MusicUpdateEvent {
     data class NewSession(val info: MusicInfo) : MusicUpdateEvent()
-    data class MetadataRefinement(val newTrackKey: String, val newArtworkKey: String, val newDuration: Long) : MusicUpdateEvent()
+    data class MetadataRefinement(val newTrackKey: String, val newArtworkKey: String, val newDuration: Long, val isPlaying: Boolean) : MusicUpdateEvent()
     data class ArtworkResolved(val trackKey: String, val artworkKey: String, val iconKey: String? = null) : MusicUpdateEvent()
     data class LyricTick(val lyric: String, val trackKey: String) : MusicUpdateEvent()
     data class SessionEnded(val finalPos: Long) : MusicUpdateEvent()
