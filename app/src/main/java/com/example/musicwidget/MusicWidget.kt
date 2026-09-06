@@ -569,8 +569,8 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     }
 
     private fun getStatusText(context: Context, info: MusicInfo): String {
-        val now = System.currentTimeMillis()
-        val timeSinceLastUpdate = now - info.lastUpdateEpoch
+        val now = android.os.SystemClock.elapsedRealtime()
+        val timeSinceLastUpdate = now - info.observedAtRealtime
         
         // MOTOR DE CONSCIENCIA TEMPORAL (v2.1)
         // Umbral de 15 minutos para considerar una sesión de pausa como "estancada" (stale).
@@ -584,7 +584,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 context.getString(R.string.status_paused)
             
             else -> { 
-                val time = formatRelativeTime(context, info.lastUpdateEpoch)
+                val time = formatRelativeTime(context, info.observedAtRealtime)
                 if (time.isEmpty()) context.getString(R.string.status_recently) else time 
             }
         }
@@ -774,10 +774,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         }
     }
 
-    private fun formatRelativeTime(context: Context, lastUpdateEpoch: Long): String {
-        if (lastUpdateEpoch <= 0) return ""
-        val now = System.currentTimeMillis()
-        val diffMillis = now - lastUpdateEpoch
+    private fun formatRelativeTime(context: Context, observedAtRealtime: Long): String {
+        if (observedAtRealtime <= 0) return ""
+        val now = android.os.SystemClock.elapsedRealtime()
+        val diffMillis = now - observedAtRealtime
         val diffHours = diffMillis / (1000 * 60 * 60)
         return when { 
             diffHours < 1 -> context.getString(R.string.widget_time_recently)

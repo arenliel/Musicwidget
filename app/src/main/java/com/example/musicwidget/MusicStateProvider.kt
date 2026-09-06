@@ -98,10 +98,12 @@ object MusicStateProvider {
     }
 
     private fun reconcileEnd(current: MusicInfo, e: MusicUpdateEvent.SessionEnded): MusicInfo {
+        val shouldResetClock = current.isPlaying
         return current.copy(
             isSessionActive = false,
             isPlaying = false,
-            lastUpdateEpoch = System.currentTimeMillis()
+            lastUpdateEpoch = if (shouldResetClock) System.currentTimeMillis() else current.lastUpdateEpoch,
+            observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime
         )
     }
     
