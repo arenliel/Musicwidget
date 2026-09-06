@@ -2225,7 +2225,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 val event = if (isSessionEnded) {
                     MusicUpdateEvent.NewSession(memInfo)
                 } else if (isTrackContentChanged) {
-                    MusicUpdateEvent.MetadataRefinement(snapshot.trackKey, snapshot.artworkKey, snapshot.durationMs)
+                    MusicUpdateEvent.MetadataRefinement(snapshot.trackKey, snapshot.artworkKey, snapshot.durationMs, isPlaying)
                 } else {
                     MusicUpdateEvent.StatusUpdate(isPlaying, snapshot.playbackDeviceName, snapshot.playbackDeviceType)
                 }
