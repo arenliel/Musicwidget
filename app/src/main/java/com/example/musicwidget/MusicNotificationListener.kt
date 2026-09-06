@@ -289,6 +289,11 @@ class MusicNotificationListener : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         InternalLogger.init(this)
+        InternalLogger.log(this, "[BUILD_ID] " +
+            "v1.0 (1) " +
+            "sha=c1f730d " + // Forzado para trazabilidad en este build
+            "built=${System.currentTimeMillis()}")
+
         InternalLogger.d(this, "SERVICE_LIFECYCLE: onCreate - Process started")
         mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
         musicDataStore = MusicDataStore(applicationContext)
@@ -680,7 +685,7 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     private fun isAppAllowed(packageName: String): Boolean {
-        val allowed = listOf("com.spotify.music", "com.google.android.apps.youtube.music", "com.google.android.youtube", "arenliel.metrolist")
+        val allowed = listOf("com.spotify.music", "com.google.android.apps.youtube.music", "com.google.android.youtube", "com.metrolist.music")
         return packageName in allowed
     }
 
@@ -688,11 +693,22 @@ class MusicNotificationListener : NotificationListenerService() {
 
     private suspend fun processSnapshot(controller: MediaController?, metadata: MediaMetadata?, rawSnapshot: MediaSnapshot, reason: String) {
         kotlinx.coroutines.withTimeoutOrNull(BOOT_GATE_TIMEOUT_MS) { bootGate.await() }
+
+        val stateName = when(rawSnapshot.playbackState) {
+            PlaybackState.STATE_PLAYING -> "PLAYING"
+            PlaybackState.STATE_PAUSED -> "PAUSED"
+            else -> "OTHER(${rawSnapshot.playbackState})"
+        }
+        InternalLogger.d(applicationContext, "[DIAG_V5] [INTAKE] Recibido: Estado=$stateName, Track=${rawSnapshot.title}, Album=${rawSnapshot.album}, Duración=${rawSnapshot.durationMs}ms, Reason=$reason")
+
         val session = currentLogicalSession
         val currentMem = MusicStateProvider.current()
         val isLatent = rawSnapshot.playbackState != PlaybackState.STATE_PLAYING || !rawSnapshot.isSessionActive
         val isMatch = rawSnapshot.title == currentMem.title && rawSnapshot.artist == currentMem.artist
-        if (isLatent && isMatch && rawSnapshot.durationMs <= 0L && !currentMem.isEmpty) return
+        if (isLatent && isMatch && rawSnapshot.durationMs <= 0L && !currentMem.isEmpty) {
+            InternalLogger.w(applicationContext, "[DIAG_V5] [GATEKEEPER] Abortando flujo. Razón: Paquete degradado. Album=${rawSnapshot.album}, Duración=${rawSnapshot.durationMs}")
+            return
+        }
 
         val myGen = generation.incrementAndGet()
         val prevLog = lastLogicalSnapshot
@@ -716,6 +732,10 @@ class MusicNotificationListener : NotificationListenerService() {
             return
         }
 
+        if (isCatchUp || artIncoherent) {
+            InternalLogger.log(applicationContext, "BYPASS: Forzando actualización (Catch-up=$isCatchUp, ArtIncoherent=$artIncoherent)")
+        }
+
         if (!isAppAllowed(rawSnapshot.packageName)) return
         val sameSess = session?.sessionIdentity == rawSnapshot.sessionIdentity
         val firstObs = if (sameSess && session != null) session.startedAtRealtime else rawSnapshot.recordedAt
@@ -731,6 +751,11 @@ class MusicNotificationListener : NotificationListenerService() {
         val catchUpRend = if (identChanged) false else Math.abs(curProj - lastProj) < 1500L
         val realLoop = rawSnapshot.playbackState == PlaybackState.STATE_PLAYING && curProj < 2000L && prog > 0.95f && !identChanged
         val sessEnded = identChanged || realLoop || (manualRewind && session?.isProvisional == false)
+
+        // INSTRUMENTACIÓN BLOQUE 3.3
+        InternalLogger.d(applicationContext, "[FSM_GUARD] identityChanged=$identChanged, " +
+            "projectedPos=${curProj}ms, rawPos=${rawSnapshot.positionMs}ms, maxPos=${session?.maxPositionMs ?: 0}ms, " +
+            "delta=${curProj - lastProj}ms, taken=${if (sessEnded) "ENDED" else if (catchUpRend) "CATCHUP" else "FUSION"}")
 
         if (session != null && session.isProvisional) {
             if (!identChanged) session.isProvisional = false
@@ -784,6 +809,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         val isVisible = isWidgetPotentiallyVisible()
         if (!isVisible) {
+            InternalLogger.log(applicationContext, "STAGE 2: Presentación suprimida (Pantalla bloqueada). Track=${snapshot.title}")
             isPresentationDirty = true; pendingSnapshot = snapshot; lyricsUpdateJob?.cancel(); lastObservedSnapshot = snapshot
         }
         
