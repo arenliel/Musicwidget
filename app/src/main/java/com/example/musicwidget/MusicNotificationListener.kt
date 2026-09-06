@@ -291,8 +291,8 @@ class MusicNotificationListener : NotificationListenerService() {
         InternalLogger.init(this)
         InternalLogger.log(this, "[BUILD_ID] " +
             "v1.0 (1) " +
-            "sha=c1f730d " + // Forzado para trazabilidad en este build
-            "built=${System.currentTimeMillis()}")
+            "sha=${BuildConfig.GIT_SHA} " +
+            "built=${BuildConfig.BUILD_TIME}")
 
         InternalLogger.d(this, "SERVICE_LIFECYCLE: onCreate - Process started")
         mediaSessionManager = getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
