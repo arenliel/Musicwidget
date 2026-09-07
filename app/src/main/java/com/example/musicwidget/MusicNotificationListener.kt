@@ -2088,7 +2088,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     sessionUUID = session.sessionUUID,
                     birthSnapshot = session.birthSnapshot,
                     finalSnapshot = session.liveSnapshot,
-                    maxPositionMs = session.maxPositionMs,
+                    maxPositionMs = max(session.maxPositionMs, session.liveSnapshot.projectedPositionMs()),
                     startedAtRealtime = session.startedAtRealtime
                 )
                 
