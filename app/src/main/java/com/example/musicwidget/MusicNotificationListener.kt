@@ -1952,6 +1952,12 @@ class MusicNotificationListener : NotificationListenerService() {
             currentMem.isPlaying == (rawSnapshot.playbackState == PlaybackState.STATE_PLAYING) && 
             currentMem.isSessionActive == rawSnapshot.isSessionActive) {
             
+            // REGLA B.1 (v9.1): Actualización de Verdad (Posición) previa al Redibujado.
+            // Aseguramos que la marca de agua progrese aunque el refresco visual sea ignorado.
+            session?.let { s ->
+                s.maxPositionMs = Math.max(s.maxPositionMs, rawSnapshot.projectedPositionMs())
+            }
+
             // Si el widget es visible pero el contenido es idéntico a la RAM, ignoramos.
             lastObservedSnapshot = rawSnapshot
             return
