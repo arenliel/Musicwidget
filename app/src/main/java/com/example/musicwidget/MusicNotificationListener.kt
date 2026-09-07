@@ -486,7 +486,7 @@ class MusicNotificationListener : NotificationListenerService() {
          * v9.0: Normalización centralizada.
          */
         val trackKey: String
-            get() = "$sessionIdentity|${MusicDataStore.normalize(album)}|$durationMs"
+            get() = "$sessionIdentity|$durationMs"
 
         /*
          * Identidad del artwork.
@@ -497,7 +497,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     ?.takeIf {
                         it.isNotBlank()
                     }
-                    ?: trackKey
+                    ?: "$sessionIdentity|${MusicDataStore.normalize(album)}|$durationMs"
 
         /*
          * Identidad base de contenido (v9.0).
@@ -958,9 +958,9 @@ class MusicNotificationListener : NotificationListenerService() {
     private suspend fun persistHistoryArtworkEagerly(snapshot: MediaSnapshot, sessionUUID: String) {
         withContext(Dispatchers.IO) {
             try {
-                val trackKey = snapshot.trackKey
+                val artworkKey = snapshot.artworkKey
                 if (sessionUUID.isBlank()) {
-                    InternalLogger.w(applicationContext, "[HIST_EAGER] Abortando: sessionUUID vacío para $trackKey")
+                    InternalLogger.w(applicationContext, "[HIST_EAGER] Abortando: sessionUUID vacío para $artworkKey")
                     return@withContext
                 }
 
@@ -969,7 +969,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 
                 // Si ya existe en disco, registramos en caché de rutas y salimos
                 if (artworkFile.exists()) {
-                    eagerArtworkPaths[trackKey] = artworkFile.absolutePath
+                    eagerArtworkPaths[artworkKey] = artworkFile.absolutePath
                     return@withContext
                 }
 
@@ -992,24 +992,24 @@ class MusicNotificationListener : NotificationListenerService() {
                             historyPill,
                             sessionUUID
                         )
-                        eagerArtworkPaths[trackKey] = finalPath
+                        eagerArtworkPaths[artworkKey] = finalPath
 
                         // REACTIVE UPDATE: Manejo de condición de carrera (Skip tardío)
                         val currentHistory = MusicStateProvider.current().history
                         val pendingItem = currentHistory.find { 
-                            it.trackKey == trackKey && it.hasPendingArtwork 
+                            it.artworkKey == artworkKey && it.hasPendingArtwork 
                         }
 
                         if (pendingItem != null) {
                             musicDataStore.updateHistoryItemArtworkStatus(
-                                trackKey, 
+                                pendingItem.trackKey, 
                                 pendingItem.timestamp, 
                                 false
                             )
                             
                             // Fase D: Screen-Gated Rendering
                             if (isWidgetPotentiallyVisible()) {
-                                Log.d("GLANCE_REFRESH", "Archivo guardado para $trackKey. Solicitando updateAll a Glance.")
+                                Log.d("GLANCE_REFRESH", "Archivo guardado para $artworkKey. Solicitando updateAll a Glance.")
                                 MusicWidget.updateAll(applicationContext)
                             } else {
                                 Log.d(TAG, "[GATING] Portada resuelta con pantalla apagada. Postergando refresco.")
@@ -1937,7 +1937,7 @@ class MusicNotificationListener : NotificationListenerService() {
             memoryArtworkCache.keys.retainAll(setOf(myCoreKey))
         }
 
-        val trackContentChanged = previousLogical?.trackKey != rawSnapshot.trackKey
+        val trackContentChanged = previousLogical?.artworkKey != rawSnapshot.artworkKey
 
         // Paso 2.2: GUARD CLAUSE (Evita procesar snapshots redundantes en Disco)
         // REGLA VIP: Si vienes de un Catch-up, ignoramos la deduplicación para forzar el renderizado visual.
