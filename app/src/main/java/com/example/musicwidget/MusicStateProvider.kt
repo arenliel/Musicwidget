@@ -42,6 +42,8 @@ object MusicStateProvider {
             is MusicUpdateEvent.ClearVisualHistory -> current.copy(history = emptyList())
         }
 
+        // Full-object equality check — this intentionally catches ANY field change, including
+        // isPlaying, so a real play/pause transition always triggers a UI notification.
         if (next == current) return@withLock false
         
         _musicInfoState.value = next

@@ -167,6 +167,11 @@ class MusicNotificationListener : NotificationListenerService() {
      * El UUID garantiza que los eventos de cierre correspondan a la sesión correcta.
      */
     private data class LogicalSession(
+        /**
+         * Uniquely identifies one physical listening session instance, even across immediate
+         * repeats of the identical track. Used to distinguish a genuine repeat play from a
+         * duplicate/burst signal of the same underlying event (see the idempotency shield).
+         */
         val sessionUUID: String = java.util.UUID.randomUUID().toString(),
         val identity: TrackIdentity,
         val birthSnapshot: MediaSnapshot, // Capturado al nacer, inmutable (v6.5)
@@ -475,21 +480,30 @@ class MusicNotificationListener : NotificationListenerService() {
         val observedAtRealtime: Long = SystemClock.elapsedRealtime(),
         val playbackDeviceType: Int = AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
     ) {
-        /*
-         * Identidad de sesión (v9.0): Centralizada en MusicDataStore.
+        /**
+         * Canonical "is this the same song" identity: package + title + artist, normalized.
+         * This is the single source of truth for business-logic identity comparisons.
+         * Never include album or duration here.
          */
         val sessionIdentity: String
             get() = MusicDataStore.computeSessionIdentity(packageName, title, artist)
 
-        /*
-         * Identidad lógica de la pista (Hash robusto para assets/disco).
-         * v9.0: Normalización centralizada.
+        /**
+         * Business identity key used for history matching, streak tracking, and "blessed repeat"
+         * detection. Deliberately does NOT include the album — a song's single and album editions
+         * are treated as the same track for these purposes (see Conjunto C).
+         * Do not add album back into this formula; use [artworkKey] for anything that needs to
+         * distinguish album editions.
          */
         val trackKey: String
             get() = "$sessionIdentity|$durationMs"
 
-        /*
-         * Identidad del artwork.
+        /**
+         * Visual identity key used for artwork resolution and caching. Falls back to its own
+         * album-aware key (not [trackKey]) specifically so that different album editions of the
+         * same song can carry different artwork. Do not change this fallback to use [trackKey] —
+         * that reintroduces cross-contamination between album editions' cached artwork (see the
+         * "Harana" and "Archie, Marry Me" history bugs, Conjunto C).
          */
         val artworkKey: String
             get() =
@@ -2288,6 +2302,10 @@ class MusicNotificationListener : NotificationListenerService() {
         // --- STAGE 2: PRESENTACIÓN (BLOQUEO POR COMPUERTA) ---
 
         if (!isWidgetPotentiallyVisible()) {
+            // NOTE (Conjunto B.2, decision recorded — do not "fix" without checking with the
+            // project owner first): artwork resolution is intentionally skipped entirely while the
+            // screen is off, including cases where a corrected artwork would otherwise reach the
+            // history. This is a deliberate battery-saving tradeoff, not an oversight.
             Log.d(TAG, "[GATING] Presentación suprimida (Pantalla apagada/bloqueada).")
             InternalLogger.log(applicationContext, "STAGE 2: Suprimido (Pantalla bloqueada). Track=${snapshot.title}")
             isPresentationDirty = true
