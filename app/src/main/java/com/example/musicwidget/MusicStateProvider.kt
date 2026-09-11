@@ -77,7 +77,8 @@ object MusicStateProvider {
             trackKey = e.newTrackKey,
             artworkKey = e.newArtworkKey,
             durationMs = e.newDuration,
-            isPlaying = e.isPlaying
+            isPlaying = e.isPlaying,
+            isBuffering = false
         )
     }
 
@@ -115,6 +116,7 @@ object MusicStateProvider {
         
         return current.copy(
             isPlaying = e.isPlaying,
+            isBuffering = e.isBuffering,
             playbackDeviceName = e.deviceName,
             playbackDeviceType = e.deviceType,
             lastUpdateEpoch = if (statusChanged) System.currentTimeMillis() else current.lastUpdateEpoch,
@@ -131,6 +133,6 @@ sealed class MusicUpdateEvent {
     data class ArtworkResolved(val trackKey: String, val artworkKey: String, val iconKey: String? = null) : MusicUpdateEvent()
     data class LyricTick(val lyric: String, val trackKey: String) : MusicUpdateEvent()
     data class SessionEnded(val finalPos: Long) : MusicUpdateEvent()
-    data class StatusUpdate(val isPlaying: Boolean, val deviceName: String, val deviceType: Int) : MusicUpdateEvent()
+    data class StatusUpdate(val isPlaying: Boolean, val deviceName: String, val deviceType: Int, val isBuffering: Boolean = false) : MusicUpdateEvent()
     object ClearVisualHistory : MusicUpdateEvent()
 }

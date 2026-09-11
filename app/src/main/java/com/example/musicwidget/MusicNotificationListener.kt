@@ -245,6 +245,7 @@ class MusicNotificationListener : NotificationListenerService() {
      * mientras Spotify está enviando varios callbacks consecutivos.
      */
     private var lastObservedSnapshot: MediaSnapshot? = null
+    private var degradedStreakStartRealtime: Long? = null
 
     /*
      * Snapshot cuya actualización terminó correctamente (Estado Visual).
@@ -1933,9 +1934,30 @@ class MusicNotificationListener : NotificationListenerService() {
         val isDegraded = rawSnapshot.durationMs <= 0L
 
         if (isLatent && isBaseIdentityMatch && isDegraded && !currentMem.isEmpty) {
-            InternalLogger.w(applicationContext, "[DIAG_V5] [GATEKEEPER] Abortando flujo. Razón: Paquete degradado. Album=${rawSnapshot.album}, Duración=${rawSnapshot.durationMs}")
+            val now = SystemClock.elapsedRealtime()
+            val streakStart = degradedStreakStartRealtime ?: now.also { degradedStreakStartRealtime = it }
+            val elapsed = now - streakStart
+
+            if (elapsed < BUFFERING_THRESHOLD_MS) {
+                InternalLogger.w(applicationContext, "[DIAG_V5] [GATEKEEPER] Abortando flujo. Razón: Paquete degradado. Album=${rawSnapshot.album}, Duración=${rawSnapshot.durationMs}")
+                return
+            }
+
+            InternalLogger.w(applicationContext, "[DIAG_V5] [GATEKEEPER] Umbral de ${BUFFERING_THRESHOLD_MS}ms superado. Activando estado Cargando.")
+            serviceScope.launch {
+                val bufferingEvent = MusicUpdateEvent.StatusUpdate(
+                    isPlaying = false,
+                    deviceName = currentMem.playbackDeviceName,
+                    deviceType = currentMem.playbackDeviceType,
+                    isBuffering = true
+                )
+                if (MusicStateProvider.applyEvent(bufferingEvent)) {
+                    uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+                }
+            }
             return
         }
+        degradedStreakStartRealtime = null
 
         /*
          * Creamos una nueva generación de forma atómica.
@@ -2253,7 +2275,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 } else if (isTrackContentChanged) {
                     MusicUpdateEvent.MetadataRefinement(snapshot.trackKey, snapshot.artworkKey, snapshot.durationMs, isPlaying)
                 } else {
-                    MusicUpdateEvent.StatusUpdate(isPlaying, snapshot.playbackDeviceName, snapshot.playbackDeviceType)
+                    MusicUpdateEvent.StatusUpdate(isPlaying, snapshot.playbackDeviceName, snapshot.playbackDeviceType, isBuffering = false)
                 }
 
                 if (MusicStateProvider.applyEvent(event)) {
@@ -3185,7 +3207,8 @@ class MusicNotificationListener : NotificationListenerService() {
         private const val APP_ICON_KEY_FILE = "app_icon.key"
         private const val MIN_ART_DIMENSION = 100
         private const val MAX_ART_DIMENSION = 800
-        private const val NORMAL_DEBOUNCE_MS = 150L
+        private const val BUFFERING_THRESHOLD_MS = 8000L
+    private const val NORMAL_DEBOUNCE_MS = 150L
         private const val FAST_DEBOUNCE_MS = 100L
         private const val METADATA_STABILIZATION_MS = 400L
         private const val NETWORK_CONNECT_TIMEOUT_MS = 3000
