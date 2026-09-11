@@ -2357,6 +2357,13 @@ class MusicNotificationListener : NotificationListenerService() {
         val trackChangedUI = 
             previousApplied?.trackKey != snapshot.trackKey
 
+        // Identidad de negocio para decidir si hace falta re-buscar la letra (Conjunto Letras-3).
+        // Evita cancelar una búsqueda o descartar una letra ya cargada solo porque trackKey
+        // cambió por una corrección tardía de duración.
+        val songChangedForLyrics = previousApplied == null ||
+            MusicDataStore.computeSessionIdentity(previousApplied.packageName, previousApplied.title, previousApplied.artist) !=
+                MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist)
+
         val appChangedUI = 
             previousApplied?.packageName != snapshot.packageName
 
@@ -2410,7 +2417,7 @@ class MusicNotificationListener : NotificationListenerService() {
             }
 
             // 1.5 GESTIÓN DE LETRAS (Independiente de la imagen para evitar desfases en pausa)
-            if (trackChangedUI) {
+            if (songChangedForLyrics) {
                 InternalLogger.d(applicationContext, "[LYRICS_TRACE] Cambio de track detectado. Reiniciando sesión.")
                 lyricsUpdateJob?.cancel()
                 lyricsFetchJob?.cancel()
@@ -2430,6 +2437,10 @@ class MusicNotificationListener : NotificationListenerService() {
                         updateLyricInWidget(snapshot.trackKey, "")
                     }
                 }
+            } else if (trackChangedUI && currentLyrics != null) {
+                // La canción de negocio es la misma (solo se afinó trackKey, ej. duración tardía).
+                // Reutilizamos la letra ya cargada en vez de re-buscarla en red (Conjunto Letras-3).
+                relaunchLyricsTicker("metadata_refined")
             } else {
                 // Sincronización pasiva: Si no hay cambio de track, relanzamos solo si hay desvío o cambio de estado
                 if (currentLyrics == null) {
