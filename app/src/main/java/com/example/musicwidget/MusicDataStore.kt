@@ -113,6 +113,11 @@ data class MusicInfo(
     val isSessionActive: Boolean = true,
 
     /*
+     * Indica si el reproductor está cargando contenido (buffering).
+     */
+    val isBuffering: Boolean = false,
+
+    /*
      * Nombre del dispositivo de salida actual (ej. "Sony WH-1000XM4", "Altavoz del teléfono").
      */
     val playbackDeviceName: String = "",

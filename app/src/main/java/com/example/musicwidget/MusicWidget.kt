@@ -577,6 +577,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val PAUSE_STALE_THRESHOLD = 15 * 60 * 1000L
 
         return when {
+            info.isBuffering -> context.getString(R.string.status_buffering)
             info.isPlaying -> context.getString(R.string.status_listening)
             
             // Si la sesión está en pausa, pero ha pasado el umbral, dejamos que pase al flujo de "Hace poco"

@@ -33,6 +33,7 @@
     <string name="history_header">Recientes</string>
     <string name="status_listening">Está sonando</string>
     <string name="status_paused">En pausa</string>
+    <string name="status_buffering">Cargando...</string>
     <string name="status_recently">Hace poco</string>
 
     <!-- Onboarding & Setup -->
