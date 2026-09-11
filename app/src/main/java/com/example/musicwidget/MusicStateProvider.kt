@@ -63,9 +63,15 @@ object MusicStateProvider {
 
         val shouldResetClock = sessionChanged || e.info.isPlaying
 
+        // Identidad de negocio (sessionIdentity, no trackKey) para decidir si la letra actual
+        // sigue perteneciendo a la misma canción. Evita descartar una letra válida solo porque
+        // trackKey cambió por una corrección tardía de duración (Conjunto Letras-2).
+        val lyricBelongsToSameSong = MusicDataStore.computeSessionIdentity(current.packageName, current.title, current.artist) ==
+            MusicDataStore.computeSessionIdentity(e.info.packageName, e.info.title, e.info.artist)
+
         return e.info.copy(
-            currentLyric = if (sessionChanged) "" else current.currentLyric,
-            lyricsTrackKey = if (sessionChanged) "" else current.lyricsTrackKey,
+            currentLyric = if (lyricBelongsToSameSong) current.currentLyric else "",
+            lyricsTrackKey = if (lyricBelongsToSameSong) e.info.trackKey else "",
             history = stableHistory,
             lastUpdateEpoch = if (shouldResetClock) System.currentTimeMillis() else current.lastUpdateEpoch,
             observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime
@@ -73,12 +79,19 @@ object MusicStateProvider {
     }
 
     private fun reconcileRefinement(current: MusicInfo, e: MusicUpdateEvent.MetadataRefinement): MusicInfo {
+        // Este evento nunca representa un cambio real de canción — es la misma pista con datos
+        // afinados (ej. duración exacta llegando tarde). Si ya había una letra resuelta y
+        // etiquetada, se re-etiqueta con el trackKey nuevo para que no quede huérfana
+        // (Conjunto Letras-2).
+        val updatedLyricsTrackKey = if (current.lyricsTrackKey.isNotBlank()) e.newTrackKey else current.lyricsTrackKey
+
         return current.copy(
             trackKey = e.newTrackKey,
             artworkKey = e.newArtworkKey,
             durationMs = e.newDuration,
             isPlaying = e.isPlaying,
-            isBuffering = false
+            isBuffering = false,
+            lyricsTrackKey = updatedLyricsTrackKey
         )
     }
 

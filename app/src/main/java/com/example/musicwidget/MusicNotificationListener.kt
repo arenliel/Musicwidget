@@ -2516,10 +2516,13 @@ class MusicNotificationListener : NotificationListenerService() {
 
                     val currentInfo = musicDataStore.musicInfoFlow.first()
                     val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
-                    val canKeepLyric = snapshot.isSessionActive && snapshot.trackKey == currentInfo.lyricsTrackKey
+                    val canKeepLyric = snapshot.isSessionActive &&
+                        currentInfo.lyricsTrackKey.isNotBlank() &&
+                        MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
+                            MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
                     
                     val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
-                    val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
+                    val finalLyricKey = if (canKeepLyric) snapshot.trackKey else ""
 
                     val (playsToday, skipStreak, isFrequent) = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
 
