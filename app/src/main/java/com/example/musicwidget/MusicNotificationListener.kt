@@ -2648,19 +2648,29 @@ class MusicNotificationListener : NotificationListenerService() {
             val entryIdx = lyricsRes.allEntries.indexOf(entry)
             val next = if (entryIdx != -1 && entryIdx < lyricsRes.allEntries.size - 1) lyricsRes.allEntries[entryIdx + 1] else null
             
+            // Hallazgo v4.1: Regla Unificada de Silencio (Conjunto Letras-2)
+            // Un solo umbral decide cuándo alternar a mostrar el artista, tanto si el
+            // próximo verso conocido tarda de más como si ya no queda ningún verso más.
             if (next != null) {
                 val waitTime = (next.timestampMs - (currentPos + snappinessOffset)).coerceAtLeast(100L)
                 
-                // Hallazgo v3.3: Silencios Inteligentes
-                if (waitTime > 15000L) {
-                    delay(8000L)
+                if (waitTime > LYRICS_SILENCE_THRESHOLD_MS) {
+                    delay(LYRICS_SILENCE_THRESHOLD_MS)
                     if (currentCoroutineContext().isActive && MusicStateProvider.current().trackKey == myTrackKey) {
                         updateLyricInWidget(myTrackKey, "")
                     }
-                    delay((waitTime - 8000L).coerceAtLeast(100L))
+                    delay((waitTime - LYRICS_SILENCE_THRESHOLD_MS).coerceAtLeast(100L))
                 } else {
                     delay(waitTime)
                 }
+            } else if (entryIdx != -1) {
+                // Ya no queda ningún verso más, pero la canción sigue sonando: aplicamos
+                // la misma regla de silencio antes de ceder el lugar al nombre del artista.
+                delay(LYRICS_SILENCE_THRESHOLD_MS)
+                if (currentCoroutineContext().isActive && MusicStateProvider.current().trackKey == myTrackKey) {
+                    updateLyricInWidget(myTrackKey, "")
+                }
+                break
             } else {
                 break
             }
@@ -3211,6 +3221,7 @@ class MusicNotificationListener : NotificationListenerService() {
         private const val MIN_ART_DIMENSION = 100
         private const val MAX_ART_DIMENSION = 800
         private const val BUFFERING_THRESHOLD_MS = 8000L
+        private const val LYRICS_SILENCE_THRESHOLD_MS = 10000L
     private const val NORMAL_DEBOUNCE_MS = 150L
         private const val FAST_DEBOUNCE_MS = 100L
         private const val METADATA_STABILIZATION_MS = 400L
