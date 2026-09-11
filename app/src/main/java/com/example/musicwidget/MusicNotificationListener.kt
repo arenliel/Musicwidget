@@ -478,6 +478,8 @@ class MusicNotificationListener : NotificationListenerService() {
         val artworkSource: ArtworkSource = ArtworkSource.Placeholder,
         val firstObservedAt: Long = recordedAt,
         val observedAtRealtime: Long = SystemClock.elapsedRealtime(),
+        val positionUpdatedAtRealtime: Long = observedAtRealtime,
+        val playbackSpeed: Float = 1.0f,
         val playbackDeviceType: Int = AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
     ) {
         /**
@@ -534,9 +536,8 @@ class MusicNotificationListener : NotificationListenerService() {
             nowRealtime: Long = SystemClock.elapsedRealtime()
         ): Long {
             if (playbackState != PlaybackState.STATE_PLAYING) return positionMs
-            val delta = nowRealtime - observedAtRealtime
-            val projected = positionMs + delta
-            
+            val delta = nowRealtime - positionUpdatedAtRealtime
+            val projected = positionMs + (delta * playbackSpeed).toLong()
             return if (durationMs > 0) projected.coerceIn(0L, durationMs)
             else projected.coerceAtLeast(0L)
         }
@@ -1343,6 +1344,8 @@ class MusicNotificationListener : NotificationListenerService() {
                     override fun onPlaybackStateChanged(
                         state: PlaybackState?
                     ) {
+                        InternalLogger.d(applicationContext, "[DIAG_V7_RAW] state=${state?.state}, rawPos=${state?.position}, speed=${state?.playbackSpeed}, lastUpdateTime=${state?.lastPositionUpdateTime}, now=${SystemClock.elapsedRealtime()}")
+                        
                         // REGLA v5.1: Solo el controlador activo tiene permiso de emitir
                         if (selectedController?.sessionToken != controller.sessionToken) return
 
@@ -1555,7 +1558,7 @@ class MusicNotificationListener : NotificationListenerService() {
             lastObservedSnapshot
                 ?.contentKey
         ) {
-
+            InternalLogger.d(applicationContext, "[DIAG_V7_KEY] Bloqueado por contentKey duplicado. Nuevo=${snapshot.contentKey}, Anterior=${lastObservedSnapshot?.contentKey}")
             return
         }
 
@@ -1565,7 +1568,7 @@ class MusicNotificationListener : NotificationListenerService() {
             inFlightSnapshot
                 ?.contentKey
         ) {
-
+            InternalLogger.d(applicationContext, "[DIAG_V7_KEY] Bloqueado por contentKey duplicado. Nuevo=${snapshot.contentKey}, Anterior=${inFlightSnapshot?.contentKey}")
             return
         }
 
@@ -1575,7 +1578,7 @@ class MusicNotificationListener : NotificationListenerService() {
             lastAppliedSnapshot
                 ?.contentKey
         ) {
-
+            InternalLogger.d(applicationContext, "[DIAG_V7_KEY] Bloqueado por contentKey duplicado. Nuevo=${snapshot.contentKey}, Anterior=${lastAppliedSnapshot?.contentKey}")
             return
         }
 
@@ -1803,7 +1806,9 @@ class MusicNotificationListener : NotificationListenerService() {
             positionMs = position,
             recordedAt = System.currentTimeMillis(),
             artworkSource = ArtworkSource.Placeholder,
-            observedAtRealtime = SystemClock.elapsedRealtime()
+            observedAtRealtime = SystemClock.elapsedRealtime(),
+            positionUpdatedAtRealtime = controller.playbackState?.lastPositionUpdateTime ?: SystemClock.elapsedRealtime(),
+            playbackSpeed = controller.playbackState?.playbackSpeed ?: 1.0f
         )
     }
 
@@ -1974,6 +1979,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
             // Si el widget es visible pero el contenido es idéntico a la RAM, ignoramos.
             lastObservedSnapshot = rawSnapshot
+            InternalLogger.d(applicationContext, "[DIAG_V7_RAM] Bloqueado por RAM idéntica. isPlaying=${currentMem.isPlaying}, isSessionActive=${currentMem.isSessionActive}")
             return
         }
 
