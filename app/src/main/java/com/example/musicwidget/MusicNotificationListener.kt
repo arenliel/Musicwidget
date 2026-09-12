@@ -1965,10 +1965,10 @@ class MusicNotificationListener : NotificationListenerService() {
         val myGeneration =
             generation.incrementAndGet()
 
-        // REGLA: Usamos lastLogicalSnapshot para la deduplicación de negocio
-        // Esto permite que el historial detecte cambios aunque la pantalla esté apagada.
+        // REGLA: Usamos lastAppliedSnapshot para la deduplicación de negocio (Cierres-1)
+        // Esto permite que el historial use la fuente de verdad del último estado aplicado.
         val previousLogical =
-            lastLogicalSnapshot
+            lastAppliedSnapshot
 
         val sessionChanged = currentLogicalSession?.identity != TrackIdentity(sanitize(rawSnapshot.title), sanitize(rawSnapshot.artist))
         
