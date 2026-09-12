@@ -1968,6 +1968,9 @@ class MusicNotificationListener : NotificationListenerService() {
         // REGLA: Usamos lastAppliedSnapshot para la deduplicación de negocio (Cierres-1)
         // Esto permite que el historial use la fuente de verdad del último estado aplicado.
         val previousLogical =
+            lastLogicalSnapshot
+
+        val previousReliable =
             lastAppliedSnapshot
 
         val sessionChanged = currentLogicalSession?.identity != TrackIdentity(sanitize(rawSnapshot.title), sanitize(rawSnapshot.artist))
@@ -2061,7 +2064,7 @@ class MusicNotificationListener : NotificationListenerService() {
         val newIdentity = TrackIdentity(sanitize(rawSnapshot.title), sanitize(rawSnapshot.artist))
         
         val currentProjectedPos = rawSnapshot.projectedPositionMs()
-        val lastProjectedPos = previousLogical?.projectedPositionMs() ?: 0L
+        val lastProjectedPos = previousReliable?.projectedPositionMs() ?: 0L
         
         val isPlaying = rawSnapshot.playbackState == PlaybackState.STATE_PLAYING
         val progressFactor = if (rawSnapshot.durationMs > 0) currentProjectedPos.toFloat() / rawSnapshot.durationMs.toFloat() else 0f
