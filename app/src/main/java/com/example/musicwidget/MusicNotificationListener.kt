@@ -1512,7 +1512,7 @@ class MusicNotificationListener : NotificationListenerService() {
         if (
             activeSessions.isEmpty()
         ) {
-            lastLogicalSnapshot?.let { last ->
+            lastAppliedSnapshot?.let { last ->
                 // WARM-UP DE DESPERTAR (v5.2.5): Bloqueo de Placeholder. Rescatamos del escudo antes de emitir SessionEnded.
                 serviceScope.launch(Dispatchers.IO) {
                     val shieldFile = File(cacheDir, DISK_SHIELD_FILE)
