@@ -2073,7 +2073,7 @@ class MusicNotificationListener : NotificationListenerService() {
         val identityChanged = currentIdentity != newIdentity
         
         // 1. Evaluamos si es un salto manual hacia atrás (Scrubbing/Rewind)
-        val isManualRewind = currentProjectedPos < (lastProjectedPos - 2000L) && !identityChanged
+        val isManualRewind = !isCatchUp && currentProjectedPos < (lastProjectedPos - 2000L) && !identityChanged
 
         // 2. Evaluamos si es un resurgimiento del sistema sin cambio real de tiempo (Catch-up)
         val isCatchUpRender = if (identityChanged) false else Math.abs(currentProjectedPos - lastProjectedPos) < 1500L
@@ -2210,8 +2210,9 @@ class MusicNotificationListener : NotificationListenerService() {
             }
         }
 
-        // ACTUALIZACIÓN DEL DIARIO LÓGICO
+        // ACTUALIZACIÓN DEL DIARIO LÓGICO (Cierres-3)
         lastLogicalSnapshot = rawSnapshot
+        lastAppliedSnapshot = snapshot
         lastObservedPositionMs = currentProjectedPos
 
         // ACTIVE WATCHER (v4.3.1): Cronómetro proactivo de 5s con LATE-READ
@@ -2587,7 +2588,6 @@ class MusicNotificationListener : NotificationListenerService() {
                         }
                     }
                     
-                    lastAppliedSnapshot = snapshot
                     lastObservedSnapshot = snapshot
                     lastCommittedInfo = MusicStateProvider.current()
                 }
