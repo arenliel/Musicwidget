@@ -2356,7 +2356,7 @@ class MusicNotificationListener : NotificationListenerService() {
         pendingSnapshot = null
 
         val previousApplied = 
-            lastAppliedSnapshot
+            lastLogicalSnapshot
 
         val trackChangedUI = 
             previousApplied?.trackKey != snapshot.trackKey
