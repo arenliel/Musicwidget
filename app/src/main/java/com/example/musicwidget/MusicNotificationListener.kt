@@ -2391,8 +2391,8 @@ class MusicNotificationListener : NotificationListenerService() {
             // Watchdog de 3.5s para no bloquear la UI si la red es lenta.
             var artworkTimedOut = false
 
-            if (controller != null && metadata != null && 
-                (trackChangedUI || artworkChangedUI || savedArtworkKey == null)) {
+            // REGLA Artwork-1: Resolución dirigida por incoherencia (evita ráfagas CPU)
+            if (controller != null && metadata != null && artIncoherent) {
                 
                 // A. Portada (v6.3 Pipeline Unificado)
                 resolvedArtwork = kotlinx.coroutines.withTimeoutOrNull(ARTWORK_PROMOTION_TIMEOUT_MS) {
@@ -2406,17 +2406,18 @@ class MusicNotificationListener : NotificationListenerService() {
                     artworkTimedOut = true
                     null
                 }
+            }
 
-                // B. Icono de app (Optimizado)
-                if (appChangedUI || savedAppIconKey == null || currentIconTier < TIER_NOTIFICATION) {
-                    val (icon, tier) = resolveAppIcon(snapshot.packageName)
-                    
-                    // Solo actualizamos si el nuevo tier es mejor o igual al actual (o es un cambio de app)
-                    if (icon != null && (appChangedUI || tier > currentIconTier)) {
-                        resolvedAppIconFinal = icon
-                        resolvedIconKey = "${snapshot.packageName}_stable"
-                        resolvedTierFinal = tier
-                    }
+            // B. Icono de app (Optimizado)
+            if (controller != null && metadata != null && 
+                (appChangedUI || savedAppIconKey == null || currentIconTier < TIER_NOTIFICATION)) {
+                val (icon, tier) = resolveAppIcon(snapshot.packageName)
+                
+                // Solo actualizamos si el nuevo tier es mejor o igual al actual (o es un cambio de app)
+                if (icon != null && (appChangedUI || tier > currentIconTier)) {
+                    resolvedAppIconFinal = icon
+                    resolvedIconKey = "${snapshot.packageName}_stable"
+                    resolvedTierFinal = tier
                 }
             }
 
@@ -2541,14 +2542,21 @@ class MusicNotificationListener : NotificationListenerService() {
 
                     val (playsToday, skipStreak, isFrequent) = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
 
+                    // REGLA Artwork-1: Conservar identidad de portada si no hubo resolución
+                    val (finalArtworkKey, finalArtworkUri) = if (artIncoherent) {
+                        snapshot.artworkKey to (snapshot.artworkUri ?: "")
+                    } else {
+                        currentInfo.artworkKey to currentInfo.artworkUri
+                    }
+
                     val finalMusicInfo = MusicInfo(
                         title = snapshot.title,
                         artist = snapshot.artist,
                         packageName = snapshot.packageName,
                         album = snapshot.album ?: "",
                         trackKey = session?.frozenTrackKey ?: snapshot.trackKey, // Usar identidad física congelada (v6.5)
-                        artworkKey = snapshot.artworkKey,
-                        artworkUri = snapshot.artworkUri ?: "",
+                        artworkKey = finalArtworkKey,
+                        artworkUri = finalArtworkUri,
                         appIconKey = savedAppIconKey ?: "",
                         isPlaying = isPlaying,
                         isSessionActive = snapshot.isSessionActive,
