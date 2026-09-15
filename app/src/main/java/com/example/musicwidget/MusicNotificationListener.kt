@@ -2401,6 +2401,9 @@ class MusicNotificationListener : NotificationListenerService() {
             // Watchdog de 3.5s para no bloquear la UI si la red es lenta.
             var artworkTimedOut = false
 
+            // REGLA Artwork-3: Captura de generación para protección de identidad
+            val genAlIniciarResolucion = identityGenerationCounter
+
             // REGLA Artwork-1: Resolución dirigida por incoherencia (evita ráfagas CPU)
             if (controller != null && metadata != null && artIncoherent) {
                 
@@ -2416,7 +2419,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     artworkTimedOut = true
                     null
                 }
-                InternalLogger.d(applicationContext, "[ART_TRACE] Resolución terminada: Exito=${resolvedArtwork != null}, gen_actual=$identityGenerationCounter, UUID_actual=${session?.sessionUUID}, Track_actual=${session?.identity?.title}")
+                InternalLogger.d(applicationContext, "[ART_TRACE] Resolución terminada: Exito=${resolvedArtwork != null}, gen_actual=$identityGenerationCounter, UUID_actual=${currentLogicalSession?.sessionUUID}, Track_actual=${currentLogicalSession?.identity?.title}")
             }
 
             // B. Icono de app (Optimizado)
@@ -2553,14 +2556,22 @@ class MusicNotificationListener : NotificationListenerService() {
 
                     val (playsToday, skipStreak, isFrequent) = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
 
-                    // REGLA Artwork-1: Conservar identidad de portada si no hubo resolución
+                    // REGLA Artwork-3: Guardar imagen resuelta con verificación de identidad síncrona
                     val (finalArtworkKey, finalArtworkUri) = if (artIncoherent) {
-                        snapshot.artworkKey to (snapshot.artworkUri ?: "")
+                        val currentUUID = currentLogicalSession?.sessionUUID
+                        val uri = if (resolvedArtwork != null && identityGenerationCounter == genAlIniciarResolucion && currentUUID != null) {
+                            ArtworkStorageManager.saveHistoryArtwork(applicationContext, resolvedArtwork, currentUUID)
+                        } else if (snapshot.trackKey == currentInfo.trackKey) {
+                            currentInfo.artworkUri
+                        } else {
+                            ""
+                        }
+                        snapshot.artworkKey to uri
                     } else {
                         currentInfo.artworkKey to currentInfo.artworkUri
                     }
 
-                    InternalLogger.d(applicationContext, "[ART_TRACE] Decisión final de portada: artIncoherent=$artIncoherent, gen=$identityGenerationCounter, UUID=${session?.sessionUUID}, valorElegido=$finalArtworkUri")
+                    InternalLogger.d(applicationContext, "[ART_TRACE] Decisión final de portada: artIncoherent=$artIncoherent, gen=$identityGenerationCounter, UUID=${currentLogicalSession?.sessionUUID}, valorElegido=$finalArtworkUri")
 
                     val finalMusicInfo = MusicInfo(
                         title = snapshot.title,
