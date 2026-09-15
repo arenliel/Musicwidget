@@ -2600,6 +2600,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
                     // 1. Sincronía Atómica: Disco -> RAM -> UI
                     val changedDisco = musicDataStore.saveMusicInfo(finalMusicInfo, forceUpdate = isCatchUp || artIncoherent || artworkTimedOut)
+                    InternalLogger.d(applicationContext, "[ART_TRACE] Persistencia confirmada: artworkUri_guardado=${musicDataStore.musicInfoFlow.first().artworkUri}")
                     
                     if (artworkTimedOut) {
                         Log.w(TAG, "[ATOMIC] Artwork promotion TIMEOUT (3.5s). Forzando UI con placeholder.")
