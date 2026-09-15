@@ -351,6 +351,7 @@ class MusicNotificationListener : NotificationListenerService() {
      */
     private var savedAppIconKey: String? = null
     private var currentIconTier: Int = TIER_NONE
+    private var identityGenerationCounter: Int = 0
 
     /*
      * Receptor dinámico para estados de pantalla.
@@ -1708,6 +1709,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 MediaMetadata.METADATA_KEY_MEDIA_ID
             )
 
+        val hasBitmap = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) != null
+        val rawUri = metadata.getString(MediaMetadata.METADATA_KEY_ART_URI) ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+        InternalLogger.d(applicationContext, "[ART_TRACE] createSnapshot: tieneBitmapEmbebido=$hasBitmap, artworkUriCruda=$rawUri")
+
         val artworkUri =
             metadata
                 .getString(
@@ -1747,6 +1752,7 @@ class MusicNotificationListener : NotificationListenerService() {
         metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)?.let { original ->
             if (!memoryArtworkCache.containsKey(myCoreKey)) {
                 runCatching {
+                    InternalLogger.d(applicationContext, "[ART_TRACE] Fase A: escribiendo para coreKey=$myCoreKey, gen_actual=$identityGenerationCounter")
                     val clone = original.copy(original.config ?: Bitmap.Config.ARGB_8888, false)
                     memoryArtworkCache[myCoreKey] = clone
                     
@@ -1759,6 +1765,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     currentLogicalSession?.let { session ->
                         if (session.identity.title == sanitize(title) && session.identity.artist == sanitize(artist)) {
                             serviceScope.launch(Dispatchers.IO) {
+                                InternalLogger.d(applicationContext, "[ART_TRACE] Retoque Atómico: escribiendo para UUID=${session.sessionUUID}, gen_actual=$identityGenerationCounter")
                                 val historyDir = File(filesDir, "history")
                                 if (!historyDir.exists()) historyDir.mkdirs()
                                 val artworkFile = File(historyDir, "art_${session.sessionUUID}.webp")
@@ -2179,7 +2186,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 playbackContext = newContext,
                 context = this@MusicNotificationListener
             )
+            InternalLogger.d(applicationContext, "[ART_TRACE] Sesión saliente antes de reemplazo: UUID=${session?.sessionUUID}, artworkKey=${session?.playbackContext?.artworkKey}")
             currentLogicalSession = newSession
+            identityGenerationCounter++
+            InternalLogger.d(applicationContext, "[ART_TRACE] Nueva generación de identidad: gen=$identityGenerationCounter, UUID=${newSession.sessionUUID}, Track=${rawSnapshot.title}")
             InternalLogger.d(applicationContext, "[FSM] Nueva Sesión Creada (UUID=${newSession.sessionUUID}): ${rawSnapshot.title}")
             
             // BUFFER DE NACIMIENTO (v9.0): Escritura directa a ruta definitiva (Bloque B.2)
@@ -2406,6 +2416,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     artworkTimedOut = true
                     null
                 }
+                InternalLogger.d(applicationContext, "[ART_TRACE] Resolución terminada: Exito=${resolvedArtwork != null}, gen_actual=$identityGenerationCounter, UUID_actual=${session?.sessionUUID}, Track_actual=${session?.identity?.title}")
             }
 
             // B. Icono de app (Optimizado)
@@ -2548,6 +2559,8 @@ class MusicNotificationListener : NotificationListenerService() {
                     } else {
                         currentInfo.artworkKey to currentInfo.artworkUri
                     }
+
+                    InternalLogger.d(applicationContext, "[ART_TRACE] Decisión final de portada: artIncoherent=$artIncoherent, gen=$identityGenerationCounter, UUID=${session?.sessionUUID}, valorElegido=$finalArtworkUri")
 
                     val finalMusicInfo = MusicInfo(
                         title = snapshot.title,
@@ -2852,6 +2865,7 @@ class MusicNotificationListener : NotificationListenerService() {
     ): Bitmap? {
         val artworkKey = snapshot.artworkKey
         val isVisible = isWidgetPotentiallyVisible()
+        InternalLogger.d(applicationContext, "[ART_TRACE] Iniciando resolución para: gen=$identityGenerationCounter, UUID=${currentLogicalSession?.sessionUUID}, Track=${snapshot.title}")
         InternalLogger.d(applicationContext, "[ARTWORK_RESOLVE] Intentando resolución. Track=${snapshot.title}, Visible=$isVisible")
         
         artworkCache.get(artworkKey)?.let { bitmap ->
