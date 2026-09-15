@@ -2544,15 +2544,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
                     // REGLA Artwork-1: Conservar identidad de portada si no hubo resolución
                     val (finalArtworkKey, finalArtworkUri) = if (artIncoherent) {
-                        val sessionUUID = session?.sessionUUID
-                        val uri = if (resolvedArtwork != null && sessionUUID != null) {
-                            ArtworkStorageManager.saveHistoryArtwork(applicationContext, resolvedArtwork, sessionUUID)
-                        } else if (snapshot.trackKey == currentInfo.trackKey) {
-                            currentInfo.artworkUri
-                        } else {
-                            ""
-                        }
-                        snapshot.artworkKey to uri
+                        snapshot.artworkKey to (snapshot.artworkUri ?: "")
                     } else {
                         currentInfo.artworkKey to currentInfo.artworkUri
                     }
