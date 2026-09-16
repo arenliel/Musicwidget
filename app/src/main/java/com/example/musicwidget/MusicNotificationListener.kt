@@ -2365,27 +2365,24 @@ class MusicNotificationListener : NotificationListenerService() {
         isPresentationDirty = false
         pendingSnapshot = null
 
-        val previousApplied = 
-            lastLogicalSnapshot
-
         val trackChangedUI = 
-            previousApplied?.trackKey != snapshot.trackKey
+            previousLogical?.trackKey != snapshot.trackKey
 
         // Identidad de negocio para decidir si hace falta re-buscar la letra (Conjunto Letras-3).
         // Evita cancelar una búsqueda o descartar una letra ya cargada solo porque trackKey
         // cambió por una corrección tardía de duración.
-        val songChangedForLyrics = previousApplied == null ||
-            MusicDataStore.computeSessionIdentity(previousApplied.packageName, previousApplied.title, previousApplied.artist) !=
+        val songChangedForLyrics = previousLogical == null ||
+            MusicDataStore.computeSessionIdentity(previousLogical.packageName, previousLogical.title, previousLogical.artist) !=
                 MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist)
 
         val appChangedUI = 
-            previousApplied?.packageName != snapshot.packageName
+            previousLogical?.packageName != snapshot.packageName
 
         val stateChangedUI = 
-            previousApplied?.playbackState != snapshot.playbackState
+            previousLogical?.playbackState != snapshot.playbackState
 
         val artworkChangedUI =
-            previousApplied?.artworkKey != snapshot.artworkKey
+            previousLogical?.artworkKey != snapshot.artworkKey
 
                 InternalLogger.d(applicationContext, "[LYRICS_TRACE] processSnapshot START: Track=${snapshot.title} | Reason=$reason | Visible=true")
 
@@ -2466,7 +2463,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     currentLyrics = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
                 }
 
-                val effectivePos = previousApplied?.projectedPositionMs() ?: 0L
+                val effectivePos = previousLogical?.projectedPositionMs() ?: 0L
                 val drift = Math.abs(effectivePos - snapshot.projectedPositionMs())
                 
                 // Hard-Sync: Solo si el desvío es mayor a 1s o cambió el estado
