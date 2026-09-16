@@ -2506,6 +2506,7 @@ class MusicNotificationListener : NotificationListenerService() {
                             // Paso 3.2: CACHING DE TRANSFORMACIÓN
                             if (savedArtworkKey != snapshot.artworkKey) {
                                 // 1. Guardar versión RAW
+                                InternalLogger.d(applicationContext, "[ART_TRACE] Escribiendo archivo sincronizado: key=${snapshot.artworkKey}, UUID=${session?.sessionUUID}")
                                 saveBitmapToFile(resolvedArtwork, ALBUM_ART_RAW_FILE, applyPillTransform = false)
                                 
                                 // 2. Guardar versión WIDGET (Píldora)

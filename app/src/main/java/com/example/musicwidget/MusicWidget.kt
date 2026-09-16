@@ -229,6 +229,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
             ).toDisplayedState(context)
 
             val isArtworkSynchronized = displayedInfo.artworkKey.trim() == readTextFile(File(context.filesDir, ALB_KEY_FILE)).trim() && displayedInfo.artworkKey.isNotBlank()
+            InternalLogger.d(context, "[ART_TRACE] Chequeo de sincronía: resultado=$isArtworkSynchronized, keyActual=${displayedInfo.artworkKey}, keyEnDisco=${readTextFile(File(context.filesDir, ALB_KEY_FILE)).trim()}")
 
             val albumArtBitmap by androidx.compose.runtime.produceState<Bitmap?>(initialValue = null, displayedInfo.artworkKey, displayedInfo.sessionUUID, needsPillAsset, isArtworkSynchronized) {
                 if (isArtworkSynchronized) {
