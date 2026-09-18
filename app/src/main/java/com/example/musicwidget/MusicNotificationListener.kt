@@ -2468,14 +2468,16 @@ class MusicNotificationListener : NotificationListenerService() {
                 relaunchLyricsTicker("metadata_refined")
             } else {
                 // Sincronización pasiva: Si no hay cambio de track, relanzamos solo si hay desvío o cambio de estado
+                InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Entrando a sincronización pasiva: currentLyricsEsNull=${currentLyrics == null}, trackKey=${snapshot.trackKey}, durationMs=${snapshot.durationMs}")
                 if (currentLyrics == null) {
                     currentLyrics = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
+                    InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Resultado de reintento: exito=${currentLyrics != null}, trackKey=${snapshot.trackKey}, durationMs=${snapshot.durationMs}")
                 }
 
                 val effectivePos = previousLogical?.projectedPositionMs() ?: 0L
                 val drift = Math.abs(effectivePos - snapshot.projectedPositionMs())
                 
-                // Hard-Sync: Solo si el desvío es mayor a 1s o cambió el estado
+                InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Pre-shouldResync: stateChangedUI=$stateChangedUI, drift=$drift, tickerActivo=${lyricsUpdateJob?.isActive}, currentLyricsEsNull=${currentLyrics == null}")
                 val shouldResync = stateChangedUI || drift > 1500L || lyricsUpdateJob?.isActive != true
 
                 if (shouldResync && currentLyrics != null) {
@@ -2652,6 +2654,7 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     private fun relaunchLyricsTicker(reason: String) {
+        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] relaunchLyricsTicker invocado: reason=$reason, currentLyricsEsNull=${currentLyrics == null}")
         if (!isWidgetPotentiallyVisible()) {
             lyricsUpdateJob?.cancel()
             return
@@ -3157,8 +3160,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 tempFile.writeText(text)
                 try {
                     Files.move(tempFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                    Log.d(TAG, "[ART_SYNC_TRACE] Archivo escrito y confirmado: fileName=$fileName, texto=$text, timestamp=${System.currentTimeMillis()}")
                 } catch (_: Exception) {
                     Files.move(tempFile.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    Log.d(TAG, "[ART_SYNC_TRACE] Archivo escrito y confirmado: fileName=$fileName, texto=$text, timestamp=${System.currentTimeMillis()}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error escribiendo archivo de texto $fileName", e)

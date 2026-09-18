@@ -25,6 +25,7 @@ class LyricsRepository(private val context: Context) {
             if (cached.notFound) {
                 // TTL 1h para re-intentos de letras (v3.0)
                 if (now - cached.timestampFetched < 1 * 60 * 60 * 1000L) {
+                    android.util.Log.d("LYRICS_RETRY_TRACE", "TTL bloqueando reintento: trackKey=$trackKey, msDesdeUltimoIntento=${now - cached.timestampFetched}")
                     return@withContext null
                 }
             } else {

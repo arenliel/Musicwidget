@@ -227,6 +227,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 notificationsEnabled = notificationsEnabled, 
                 batteryOptimized = batteryOptimized
             ).toDisplayedState(context)
+            InternalLogger.d(context, "[ART_SYNC_TRACE] displayedInfo leído: artworkKey=${displayedInfo.artworkKey}, sessionUUID=${displayedInfo.sessionUUID}, timestamp=${System.currentTimeMillis()}")
 
             val isArtworkSynchronized = displayedInfo.artworkKey.trim() == readTextFile(File(context.filesDir, ALB_KEY_FILE)).trim() && displayedInfo.artworkKey.isNotBlank()
             InternalLogger.d(context, "[ART_TRACE] Chequeo de sincronía: resultado=$isArtworkSynchronized, keyActual=${displayedInfo.artworkKey}, keyEnDisco=${readTextFile(File(context.filesDir, ALB_KEY_FILE)).trim()}")
