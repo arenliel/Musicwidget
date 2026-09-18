@@ -515,7 +515,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     ?.takeIf {
                         it.isNotBlank()
                     }
-                    ?: "$sessionIdentity|${MusicDataStore.normalize(album)}|$durationMs"
+                    ?: "$sessionIdentity|${MusicDataStore.normalize(album)}"
 
         /*
          * Identidad base de contenido (v9.0).
@@ -2310,7 +2310,12 @@ class MusicNotificationListener : NotificationListenerService() {
             serviceScope.launch {
                 val currentInfo = musicDataStore.musicInfoFlow.first()
                 val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
-                val canKeepLyric = snapshot.isSessionActive && snapshot.trackKey == currentInfo.lyricsTrackKey
+                val oldCanKeepLyric = snapshot.isSessionActive && snapshot.trackKey == currentInfo.lyricsTrackKey
+                val canKeepLyric = snapshot.isSessionActive &&
+                    currentInfo.lyricsTrackKey.isNotBlank() &&
+                    MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
+                        MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
+                InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso6_canKeepLyricStage1: viejo=$oldCanKeepLyric, nuevo=$canKeepLyric, coincide=${oldCanKeepLyric == canKeepLyric}")
                 
                 val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
                 val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
@@ -2365,8 +2370,12 @@ class MusicNotificationListener : NotificationListenerService() {
         isPresentationDirty = false
         pendingSnapshot = null
 
+        val oldTrackChangedUI = previousLogical?.trackKey != snapshot.trackKey
         val trackChangedUI = 
-            previousLogical?.trackKey != snapshot.trackKey
+            previousLogical == null ||
+            MusicDataStore.computeSessionIdentity(previousLogical.packageName, previousLogical.title, previousLogical.artist) !=
+                MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist)
+        InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso1_trackChangedUI: viejo=$oldTrackChangedUI, nuevo=$trackChangedUI, coincide=${oldTrackChangedUI == trackChangedUI}, track=${snapshot.title}")
 
         // Identidad de negocio para decidir si hace falta re-buscar la letra (Conjunto Letras-3).
         // Evita cancelar una búsqueda o descartar una letra ya cargada solo porque trackKey
@@ -2559,7 +2568,13 @@ class MusicNotificationListener : NotificationListenerService() {
                         val currentUUID = currentLogicalSession?.sessionUUID
                         val uri = if (resolvedArtwork != null && identityGenerationCounter == genAlIniciarResolucion && currentUUID != null) {
                             ArtworkStorageManager.saveHistoryArtwork(applicationContext, resolvedArtwork, currentUUID)
-                        } else if (snapshot.trackKey == currentInfo.trackKey) {
+                        } else if (run {
+                                val oldMatch = snapshot.trackKey == currentInfo.trackKey
+                                val newMatch = MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
+                                    MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
+                                InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso2_artworkFallback: viejo=$oldMatch, nuevo=$newMatch, coincide=${oldMatch == newMatch}, track=${snapshot.title}")
+                                newMatch
+                            }) {
                             currentInfo.artworkUri
                         } else {
                             ""
@@ -2661,9 +2676,9 @@ class MusicNotificationListener : NotificationListenerService() {
             ) ?: return@launch
 
             if (currentInfo.isPlaying) {
-                runLyricsShowcase(currentInfo.trackKey, lyricsRes)
+                runLyricsShowcase(MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist), lyricsRes)
             } else {
-                runPausedLyricsCycle(currentInfo.trackKey, lyricsRes)
+                runPausedLyricsCycle(MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist), lyricsRes)
             }
         }
     }
@@ -2674,7 +2689,10 @@ class MusicNotificationListener : NotificationListenerService() {
         while (currentCoroutineContext().isActive) {
             val currentRAM = MusicStateProvider.current()
             // REGLA DE IDENTIDAD DUAL: Si la sesión física (Karaoke) cambió, abortamos
-            if (currentRAM.trackKey != myTrackKey || !currentRAM.isPlaying) {
+            val oldZombieCheck = currentRAM.trackKey != myTrackKey
+            val newZombieCheck = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist) != myTrackKey
+            InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_zombieDetector: viejo=$oldZombieCheck, nuevo=$newZombieCheck, coincide=${oldZombieCheck == newZombieCheck}")
+            if (newZombieCheck || !currentRAM.isPlaying) {
                 InternalLogger.d(applicationContext, "[LYRICS_TRACE] Zombie Detector: Clave discordante. Cancelando Ticker.")
                 lyricsUpdateJob?.cancel()
                 break
@@ -2701,7 +2719,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 
                 if (waitTime > LYRICS_SILENCE_THRESHOLD_MS) {
                     delay(LYRICS_SILENCE_THRESHOLD_MS)
-                    if (currentCoroutineContext().isActive && MusicStateProvider.current().trackKey == myTrackKey) {
+                    val oldSilenceCheck = MusicStateProvider.current().trackKey == myTrackKey
+                    val newSilenceCheck = MusicDataStore.computeSessionIdentity(MusicStateProvider.current().packageName, MusicStateProvider.current().title, MusicStateProvider.current().artist) == myTrackKey
+                    InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_silencio: viejo=$oldSilenceCheck, nuevo=$newSilenceCheck, coincide=${oldSilenceCheck == newSilenceCheck}")
+                    if (currentCoroutineContext().isActive && newSilenceCheck) {
                         updateLyricInWidget(myTrackKey, "")
                     }
                     delay((waitTime - LYRICS_SILENCE_THRESHOLD_MS).coerceAtLeast(100L))
@@ -2712,7 +2733,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 // Ya no queda ningún verso más, pero la canción sigue sonando: aplicamos
                 // la misma regla de silencio antes de ceder el lugar al nombre del artista.
                 delay(LYRICS_SILENCE_THRESHOLD_MS)
-                if (currentCoroutineContext().isActive && MusicStateProvider.current().trackKey == myTrackKey) {
+                val oldSilenceCheck = MusicStateProvider.current().trackKey == myTrackKey
+                val newSilenceCheck = MusicDataStore.computeSessionIdentity(MusicStateProvider.current().packageName, MusicStateProvider.current().title, MusicStateProvider.current().artist) == myTrackKey
+                InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_silencio: viejo=$oldSilenceCheck, nuevo=$newSilenceCheck, coincide=${oldSilenceCheck == newSilenceCheck}")
+                if (currentCoroutineContext().isActive && newSilenceCheck) {
                     updateLyricInWidget(myTrackKey, "")
                 }
                 break

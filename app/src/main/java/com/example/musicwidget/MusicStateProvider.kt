@@ -54,7 +54,10 @@ object MusicStateProvider {
         // Hallazgo v4.2: Estabilización de Scroll Inteligente.
         // Si la sesión cambió, permitimos que el historial se actualice (para mostrar la canción nueva).
         // Pero si los datos son idénticos, preservamos la referencia física para silenciar el scroll.
-        val sessionChanged = current.trackKey != e.info.trackKey
+        val oldSessionChanged = current.trackKey != e.info.trackKey
+        val sessionChanged = MusicDataStore.computeSessionIdentity(current.packageName, current.title, current.artist) !=
+            MusicDataStore.computeSessionIdentity(e.info.packageName, e.info.title, e.info.artist)
+        android.util.Log.d("IDENTITY_TRACE", "Paso4_reconcileNewSession: viejo=$oldSessionChanged, nuevo=$sessionChanged, coincide=${oldSessionChanged == sessionChanged}")
         val stableHistory = if (!sessionChanged && e.info.history == current.history) {
             current.history
         } else {

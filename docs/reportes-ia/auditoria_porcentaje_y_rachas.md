@@ -1,129 +1,238 @@
-# Auditoría Profunda — Cálculo de Porcentaje Escuchado y Alimentación de Rachas
+# Auditoría — Ronda 2: Cierre de Verbatim Pendiente (Relojes + Racha)
 
-## Sección A — Cálculo del porcentaje de reproducción (`SKIP_MATH`)
+## Estado del Proyecto (git log)
 
-### A1. Bloque de cálculo de `SKIP_MATH`
-**Archivo:** [MusicNotificationListener.kt](file:///C:/Users/arenliel/AndroidStudioProjects/MusicWidget/app/src/main/java/com/example/musicwidget/MusicNotificationListener.kt) (Líneas 825-842)
+```text
+bb7b30a (HEAD -> master) Docs: descriptive identity and sync comments (Phase 1)
+45753c8 Conjunto B: Proyección final de posición al cierre de sesión para asegurar precisión en racha (pantalla apagada)
+9e55bad Conjunto B.1: actualización de posición real (Verdad) previa al guarda de deduplicación
+```
+**Nota:** El HEAD actual es `bb7b30a`, un commit posterior a `45753c8` (el cual es ahora el anterior).
+
+---
+
+## Sección A — Relojes desincronizados (continuación)
+
+### A5. Valores exactos de las constantes de debounce
+Ubicación: `MusicNotificationListener.kt` (Líneas 3182-3184)
 
 ```kotlin
-            val hasArtwork = artworkFile.exists()
-            // v9.0: Usar marca de agua rehidratada/persistente para clasificación (Bloque D)
-            val finalPos = maxPositionMs
-            
-            // CASCADA DE DURACIÓN (v9.0: Blindaje contra valores <= 0)
-            val effectiveDuration = when {
-                endSnapshot.durationMs > 0 -> endSnapshot.durationMs
-                startSnapshot.durationMs > 0 -> startSnapshot.durationMs
-                else -> {
-                    val diskDur = musicDataStore.musicInfoFlow.first().durationMs
-                    if (diskDur > 0) diskDur else 0L
-                }
-            }
-
-            val progressFactor = if (effectiveDuration > 0) {
-                finalPos.toFloat() / effectiveDuration.toFloat()
-            } else -1f // Indicador de UNKNOWN
-
-            // FÓRMULA DE SKIP PURA (v6.5): Basada exclusivamente en el progreso del Snapshot final
-            // v7.0: Blindaje contra división por cero (UNKNOWN)
-            var isSkipped = progressFactor in 0.0f..0.4f
+private const val NORMAL_DEBOUNCE_MS = 150L
+private const val FAST_DEBOUNCE_MS = 100L
+private const val METADATA_STABILIZATION_MS = 400L
 ```
 
-**Origen de los valores:**
-- **`FinalPos` (línea 825):** Es literalmente el parámetro `maxPositionMs` recibido por la función `commitToHistory`. Este valor proviene de la sesión lógica (`session.maxPositionMs`).
-- **`Duration` (líneas 828-835):** Sigue una cascada de prioridad: `endSnapshot.durationMs` -> `startSnapshot.durationMs` -> valor persistido en `DataStore`.
-- **`Factor` (línea 837):** Es la división simple de `finalPos / effectiveDuration`.
-- **`Verdict` (`isSkipped`) (línea 841):** Es un booleano que determina si el factor está entre 0% y 40%.
+### A6. Ubicación real de los logs `FSM_GUARD` y `[DIAG_V5] [INTAKE]`
+Ambos logs residen dentro de la función `processSnapshot` en `MusicNotificationListener.kt`.
 
-### A2. Umbrales de clasificación
-**Archivo:** [MusicNotificationListener.kt](file:///C:/Users/arenliel/AndroidStudioProjects/MusicWidget/app/src/main/java/com/example/musicwidget/MusicNotificationListener.kt) (Líneas 841-852)
-
+**Coincidencia 1: `[DIAG_V5] [INTAKE]`**
 ```kotlin
-            var isSkipped = progressFactor in 0.0f..0.4f
-            
-            // ... (lógica de bendición omitida) ...
+// Función: processSnapshot (Línea 1917)
+        val stateName = when(rawSnapshot.playbackState) {
+            PlaybackState.STATE_PLAYING -> "PLAYING"
+            PlaybackState.STATE_PAUSED -> "PAUSED"
+            else -> "OTHER(${rawSnapshot.playbackState})"
+        }
+        InternalLogger.d(applicationContext, "[DIAG_V5] [INTAKE] Recibido: Estado=$stateName, Track=${rawSnapshot.title}, Album=${rawSnapshot.album}, Duración=${rawSnapshot.durationMs}ms, Reason=$reason")
 
-            val isPartial = !isSkipped && progressFactor < 0.85f
-
-            val outcome = when {
-                isSkipped -> "SKIPPED"
-                isPartial -> "PARTIAL"
-                else -> "COMPLETED"
-            }
+        // --- STAGE 1: RESOLUCIÓN DE ESTADO (EJECUCIÓN SIEMPRE ACTIVA) ---
 ```
-**Umbrales exactos:**
-- **SKIPPED:** 0% a 40% (inclusive).
-- **PARTIAL:** Mayor al 40% y menor al 85%.
-- **COMPLETED:** 85% o superior.
 
-### A3. Dependencia de visibilidad
-El cálculo de `SKIP_MATH` en sí mismo **no contiene condiciones de visibilidad**. Se ejecuta incondicionalmente cuando el `HistoryWorker` procesa un evento de commit. Sin embargo, la actualización visual posterior sí está condicionada (Línea 876):
-
+**Coincidencia 2: `FSM_GUARD`**
 ```kotlin
-            // v9.0: Refresco visual condicionado al estado de pantalla (Bloque E.2)
-            if (isWidgetPotentiallyVisible()) {
+// Función: processSnapshot (Línea 2068)
+        session?.let { s ->
+            if (!identityChanged) {
+                s.maxPositionMs = max(s.maxPositionMs, currentProjectedPos)
+            }
+        }
+
+        // INSTRUMENTACIÓN BLOQUE 3.3
+        InternalLogger.d(applicationContext, "[FSM_GUARD] identityChanged=$identityChanged, " +
+            "projectedPos=${currentProjectedPos}ms, rawPos=${rawSnapshot.positionMs}ms, maxPos=${session?.maxPositionMs ?: 0}ms, " +
+            "delta=${currentProjectedPos - lastProjectedPos}ms, taken=${if (sessionEnded) "ENDED" else if (isCatchUpRender) "CATCHUP" else "FUSION"}")
+
+        // BLOQUE 6.1: Manejo de Sesión Provisional (Resurrección vs Cierre Retroactivo)
+```
+
+### A7. Variable `elapsed` en `MusicNotificationListener.kt`
+Grep completo de la palabra `elapsed`:
+
+1. `MusicNotificationListener.kt:659` (dentro de `startSeekEventProcessor`):
+```kotlin
+    .collect { (snapshot, position, detectedAt) ->
+        val now = SystemClock.elapsedRealtime()
+        val processingLag = now - detectedAt
+```
+2. `MusicNotificationListener.kt:738` (dentro de `startHistoryWorker`):
+```kotlin
+    is HistoryEvent.CommitSession -> {
+        val durationObserved = android.os.SystemClock.elapsedRealtime() - event.startedAtRealtime
+        
+        InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] EVENT_RECEIVED: ${event.finalSnapshot.title}")
+```
+3. `MusicNotificationListener.kt:1353` (dentro de `onPlaybackStateChanged`):
+```kotlin
+    if (lastSnapshot != null && lastSnapshot.packageName == controller.packageName) {
+        val elapsed = SystemClock.elapsedRealtime() - lastSnapshot.observedAtRealtime
+        val expectedPos = lastSnapshot.projectedPositionMs()
+        val actualPos = state.position
+```
+**Evidencia:** En `onPlaybackStateChanged`, `elapsed` se declara en la línea 1353 pero **no se utiliza** en las líneas subsiguientes ni en el cálculo de `expectedPos` (el cual delega el cálculo del delta a `projectedPositionMs()`).
+
+### A8. Verbatim de Snapshots con contexto
+
+**session.liveSnapshot:**
+```kotlin
+// MusicNotificationListener.kt:1387
+        // "pendiente de compromiso". Si la sesión no resucita tras Doze, la archivaremos tarde.
+        currentLogicalSession?.let { session ->
+            if (session.liveSnapshot.packageName == controller.packageName) {
                 serviceScope.launch {
-                    MusicWidget.updateAll(applicationContext)
-                }
-            } else {
-                hasPendingUpdates = true
-                InternalLogger.d(applicationContext, "[GATING] Commit de historial con pantalla apagada. Postergando refresco.")
-            }
+--
+// MusicNotificationListener.kt:1391
+                serviceScope.launch {
+                    val currentInfo = musicDataStore.musicInfoFlow.first()
+                    val finalPos = session.liveSnapshot.projectedPositionMs()
+                    
+                    val pendingInfo = currentInfo.copy(
+--
+// MusicNotificationListener.kt:2085
+            sessionUUID = session.sessionUUID,
+            birthSnapshot = session.birthSnapshot,
+            finalSnapshot = session.liveSnapshot,
+            maxPositionMs = session.maxPositionMs,
+            startedAtRealtime = session.startedAtRealtime
+--
+// MusicNotificationListener.kt:2104
+            sessionUUID = session.sessionUUID,
+            birthSnapshot = session.birthSnapshot,
+            finalSnapshot = session.liveSnapshot,
+            maxPositionMs = max(session.maxPositionMs, session.liveSnapshot.projectedPositionMs()),
+            startedAtRealtime = session.startedAtRealtime
+```
+
+**lastLogicalSnapshot:**
+```kotlin
+// MusicNotificationListener.kt:256
+    * Permite que el historial y la deduplicación funcionen con la pantalla apagada.
+    */
+    private var lastLogicalSnapshot: MediaSnapshot? = null
+    
+    /*
+--
+// MusicNotificationListener.kt:667
+            observedAtRealtime = now
+        )
+        lastLogicalSnapshot = updatedSnapshot
+        relaunchLyricsTicker("seek_event")
+    }
+--
+// MusicNotificationListener.kt:1513
+            activeSessions.isEmpty()
+        ) {
+            lastLogicalSnapshot?.let { last ->
+                // WARM-UP DE DESPERTAR (v5.2.5): Bloqueo de Placeholder. Rescatamos del escudo antes de emitir SessionEnded.
+                serviceScope.launch(Dispatchers.IO) {
+--
+// MusicNotificationListener.kt:1944
+        // Esto permite que el historial detecte cambios aunque la pantalla esté apagada.
+        val previousLogical =
+            lastLogicalSnapshot
+            
+        val sessionChanged = currentLogicalSession?.identity != TrackIdentity(sanitize(rawSnapshot.title), sanitize(rawSnapshot.artist))
+--
+// MusicNotificationListener.kt:2183
+        // ACTUALIZACIÓN DEL DIARIO LÓGICO
+        lastLogicalSnapshot = rawSnapshot
+        lastObservedPositionMs = currentProjectedPos
 ```
 
 ---
 
-## Sección B — Alimentación de Rachas
+## Sección B — Punto ciego de racha (continuación)
 
-### B1. Consumo de datos por mecanismo
-Los tres mecanismos consumen directamente el resultado de `isSkipped` calculado en `commitToHistory`.
-
-**Archivo:** [MusicNotificationListener.kt](file:///C:/Users/arenliel/AndroidStudioProjects/MusicWidget/app/src/main/java/com/example/musicwidget/MusicNotificationListener.kt) (Líneas 855-857)
+### B4. Verbatim completo de `updateRepeatStats`
+Ubicación: `MusicDataStore.kt`
 
 ```kotlin
+    suspend fun updateRepeatStats(title: String, artist: String, isSkip: Boolean): Pair<Int, Int> {
+        var finalPlaysToday = 0
+        var finalStreakDays = 0
+        context.dataStore.edit { prefs ->
+            val statsMap = decodeRepeatStats(prefs[REPEAT_STATS].orEmpty()).toMutableMap()
+            val identity = "$title|$artist"
+            val existing = statsMap[identity]
+            val today = java.time.LocalDate.now().toEpochDay()
+
+            val updated = if (isSkip) {
+                // El skip mata la racha inmediatamente
+                RepeatStats(playsToday = 0, lastPlayedEpochDay = today, streakDays = 0)
+            } else if (existing == null) {
+                // Primera vez que suena
+                RepeatStats(playsToday = 1, lastPlayedEpochDay = today, streakDays = 1)
+            } else {
+                when (today - existing.lastPlayedEpochDay) {
+                    0L -> existing.copy(playsToday = existing.playsToday + 1) // Mismo día
+                    1L -> existing.copy(playsToday = 1, lastPlayedEpochDay = today, streakDays = existing.streakDays + 1) // Día consecutivo
+                    else -> RepeatStats(playsToday = 1, lastPlayedEpochDay = today, streakDays = 1) // Hueco temporal, reset
+                }
+            }
+
+            finalPlaysToday = updated.playsToday
+            finalStreakDays = updated.streakDays
+
+            if (updated.playsToday > 0 || updated.streakDays > 0) {
+                statsMap[identity] = updated
+            } else {
+                statsMap.remove(identity)
+            }
+
+            // Limpieza LRU: Mantener solo las últimas 30 canciones con racha activa
+            if (statsMap.size > 30) {
+                val keysToRemove = statsMap.keys.take(statsMap.size - 30)
+                keysToRemove.forEach { statsMap.remove(it) }
+            }
+
+            val newObj = JSONObject()
+            statsMap.forEach { (k, v) ->
+                val inner = JSONObject()
+                inner.put("pt", v.playsToday)
+                inner.put("lp", v.lastPlayedEpochDay)
+                inner.put("sd", v.streakDays)
+                newObj.put(k, inner)
+            }
+            prefs[REPEAT_STATS] = newObj.toString()
+        }
+        return finalPlaysToday to finalStreakDays
+    }
+```
+
+### B5. Sitios de llamada de `updateRepeatStats(...)`
+Existe una única llamada en el pipeline principal.
+
+**Ubicación:** `MusicNotificationListener.kt`, dentro de la función `commitToHistory` (procesamiento del canal de historial).
+
+```kotlin
+// MusicNotificationListener.kt:872
             val newStreak = musicDataStore.updateSkipStreak(startSnapshot.title, startSnapshot.artist, isSkipped)
             val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, isSkipped)
             if (!isSkipped && !isPartial) musicDataStore.updateArtistStats(startSnapshot.artist)
 ```
+**Argumento:** Se pasa la variable `isSkipped` (calculada localmente en la función).
 
-- **Racha de Skips (`updateSkipStreak`):** Recibe `isSkipped` (booleano).
-- **Racha de Repetición (`updateRepeatStats`):** Recibe `isSkipped` (booleano). Internamente, si `isSkip` es true, mata la racha (Ver `MusicDataStore.kt:981`).
-- **Artista Frecuente (`updateArtistStats`):** No recibe el booleano directamente, sino que su llamada está condicionada a que la canción sea `COMPLETED` (`!isSkipped && !isPartial`).
+### B6. Rastreo de la variable `isSkipped`
+Dentro de `commitToHistory`:
 
-### B2. Momento de actualización
-Los tres mecanismos se actualizan **únicamente en el momento del cierre de sesión** (dentro de `commitToHistory`), no en tiempo real.
+1. **Línea 852 (Declaración):**
+   `var isSkipped = progressFactor in 0.0f..0.4f`
+2. **Línea 855-857 (Bloque "Blessed"):**
+   ```kotlin
+            val currentRAM = MusicStateProvider.current()
+            val isBlessed = currentRAM.history.any { it.trackKey == trackKey && !it.isSkipped }
+            if (isBlessed && isSkipped) isSkipped = false
+   ```
+3. **Línea 872 (Consumo):**
+   `val repeatAnalytics = musicDataStore.updateRepeatStats(..., isSkipped)`
 
-### B3. Afectación del estado de la pantalla
-El estado de la pantalla **no afecta de forma independiente** a estos mecanismos. Se actualizan siempre que se procese el commit de la sesión, independientemente de si el widget se redibuja o no.
-
----
-
-## Sección C — Disponibilidad de datos y Proyección
-
-### C1. Mecanismo de sondeo (Polling)
-**No existe** actualmente un mecanismo de sondeo activo que pregunte periódicamente la posición al `MediaController`. El sistema es puramente reactivo a callbacks y eventos de sistema. El único "timer" relacionado es `unlockPollingJob`, pero solo verifica el estado del `Keyguard` tras encender la pantalla.
-
-### C2. Disponibilidad del Snapshot en el cierre
-En `processSnapshot`, cuando se detecta el fin de sesión (`sessionEnded = true`), el objeto `currentLogicalSession` todavía contiene la información de la sesión que expira.
-
-**Archivo:** [MusicNotificationListener.kt](file:///C:/Users/arenliel/AndroidStudioProjects/MusicWidget/app/src/main/java/com/example/musicwidget/MusicNotificationListener.kt) (Líneas 2073-2086)
-
-```kotlin
-        if (sessionEnded && !isCatchUpRender) {
-            // AQUÍ EJECUTAMOS EL COMPROMISO ATÓMICO AL HISTORIAL (v6.5)
-            currentLogicalSession?.let { session ->
-                // Verificación de seguridad v7.0: Una sesión provisional nunca emite aquí
-                if (session.isProvisional) return@let
-
-                val commitEvent = HistoryEvent.CommitSession(
-                    sessionUUID = session.sessionUUID,
-                    birthSnapshot = session.birthSnapshot,
-                    finalSnapshot = session.liveSnapshot,
-                    maxPositionMs = session.maxPositionMs,
-                    startedAtRealtime = session.startedAtRealtime
-                )
-```
-En este punto, `session.liveSnapshot` es el último snapshot capturado para esa sesión, el cual contiene los campos `positionMs` y `observedAtRealtime` necesarios para invocar `projectedPositionMs()`.
-
-### C3. Fuentes de datos de posición
-La **única fuente** de datos de posición son los objetos `PlaybackState` obtenidos a través de los `MediaController` (ya sea vía callback `onPlaybackStateChanged` o lectura directa en `refreshBestSession`). No hay otras vías de obtención de progreso.
+**Evidencia:** La variable `isSkipped` pasada a la racha es **la misma** que el bloque "Blessed" modifica. Si una canción fue escuchada previamente (`isBlessed = true`), el skip actual se ignora antes de llamar a `updateRepeatStats`.

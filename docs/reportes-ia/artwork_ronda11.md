@@ -18,15 +18,19 @@ Ubicado en `MusicNotificationListener.kt` (Línea 175). Cada vez que se instanci
 169:     private data class LogicalSession(
 170:         /**
 171:          * Uniquely identifies one physical listening session instance, even across immediate
-172:          * repeats of the identical track.
-173:          */
-174:         val sessionUUID: String = java.util.UUID.randomUUID().toString(),
+172:          * repeats of the identical track. Used to distinguish a genuine repeat play from a
+173:          * duplicate/burst signal of the same underlying event (see the idempotency shield).
+174:          */
+175:         val sessionUUID: String = java.util.UUID.randomUUID().toString(),
 ```
 
-### 2. Compromiso en el Historial
-Ubicado en `processSnapshot` (Línea 2133). Se transfiere el UUID de la sesión al evento de commit.
+### 2. Compromiso en el Historial (Retroactivo y de Cierre)
+Ubicado en `processSnapshot` (Líneas 2114 y 2133). Se transfiere el UUID de la sesión al evento de commit para el historial.
 
 ```kotlin
+2113:                 historyChannel.trySend(HistoryEvent.CommitSession(
+2114:                     sessionUUID = session.sessionUUID,
+...
 2132:                 val commitEvent = HistoryEvent.CommitSession(
 2133:                     sessionUUID = session.sessionUUID,
 ```
@@ -40,13 +44,20 @@ Ubicado en `processSnapshot` (Línea 2572). Se asigna al objeto de información 
 2572:                         sessionUUID = session?.sessionUUID ?: "",
 ```
 
+### 4. Persistencia en DataStore
+Ubicado en `MusicDataStore.kt` (Línea 486).
+
+```kotlin
+486:             prefs[SESSION_UUID] = info.sessionUUID
+```
+
 ---
 
 ## AG2. ¿En qué momento exacto, dentro de `processSnapshot`, `session` pasa a apuntar a una sesión nueva?
 
 Ubicado en `MusicNotificationListener.kt` (Línea 2182). 
 
-Cuando se detecta un cambio de identidad (`sessionEnded = true`), se crea un objeto `newSession` y se asigna a la variable global de clase `currentLogicalSession`:
+Cuando se detecta un cambio de identidad (`sessionEnded = true`), se crea un objeto `newSession` (Línea 2173) y se asigna a la variable global de clase `currentLogicalSession`:
 
 ```kotlin
 2182:             currentLogicalSession = newSession
@@ -67,7 +78,7 @@ Aunque la variable global `currentLogicalSession` se actualiza, la función `pro
 1913:         val session = currentLogicalSession
 ```
 
-Debido a que esta variable local `session` **NUNCA** se reasigna tras la creación de la nueva sesión en la línea 2182, toda la **Stage 2** (incluyendo el bloque de construcción de `finalMusicInfo` en la línea 2552) continúa utilizando la referencia a la **SESIÓN ANTERIOR (OLD)**.
+Debido a que esta variable local `session` **NUNCA** se reasigna tras la creación de la nueva sesión en la línea 2182, toda la **Stage 2** (incluyendo el bloque de construcción de `finalMusicInfo` en la línea 2552) continúa utilizando la referencia a la **SESIÓN ANTERIOR (OLD)** en lugar de la nueva.
 
 ---
 
@@ -77,10 +88,20 @@ En el contexto de una **única ejecución** de `processSnapshot` que detecta un 
 - La variable global `currentLogicalSession` cambia **1 vez** (de Vieja a Nueva).
 - La variable local `session` (el contexto de la función) cambia **0 veces** (permanece siendo la Vieja).
 
-En el contexto de una **ráfaga de eventos de sistema** (debido a la lógica de debounce en `requestRefresh`):
-- El sistema de debounce cancela los trabajos previos. Si una ejecución de `processSnapshot` estaba en curso y es cancelada, se detiene.
-- La **última ejecución** de la ráfaga capturará el valor de `currentLogicalSession` que dejó la ejecución anterior (si esta alcanzó a llegar a la línea 2182 antes de ser cancelada).
+En el contexto de una **ráfaga de eventos** (gracias al debounce):
+- Es posible que `session` (local) apunte a una canción mientras `currentLogicalSession` (global) ya apunta a la siguiente si una ejecución previa no fue cancelada a tiempo o si se procesaron varios eventos legítimos.
+- Si entra un evento para la "Canción C" mientras se procesa la "Canción B", este capturará la sesión de la "Canción B" (si ya se actualizó el global).
 
-**Resultado:** Es posible que `session` (local) apunte a la "Canción A" mientras se está procesando la "Canción B", y que la "Canción B" actualice la variable global a una nueva "Sesión B". Si entra un tercer evento para la "Canción C" antes de que el anterior termine, este capturará la "Sesión B" como su base de comparación. 
+---
 
-Sin embargo, el error más grave identificado es que **dentro de un mismo ciclo de cambio de canción**, los metadatos de la nueva canción (Stage 2) se están asociando al UUID de la sesión que acaba de terminar (debido al uso de la variable local capturada en la línea 1913).
+## AG5. ¿El archivo de portada del historial, guardado al nacer una sesión, es accesible desde el punto donde se construye "ahora sonando"?
+
+**SÍ, pero con condiciones.**
+
+Al nacer una sesión (Línea 2185), se guarda un archivo en `history/art_${uuid}.webp`.
+En el bloque de construcción de `finalMusicInfo` (Línea 2552), se tiene acceso a:
+1. `sessionUUID` (que como vimos en AG3, actualmente apunta al UUID de la sesión vieja).
+2. Si se corrigiera el uso de la variable local para que apunte a `currentLogicalSession?.sessionUUID`, entonces se podría reconstruir la ruta del archivo:
+   `val historyFile = File(filesDir, "history/art_${currentLogicalSession?.sessionUUID}.webp")`
+
+**Conclusión:** El archivo ya existe y es accesible, pero la lógica actual de `processSnapshot` tiene un error de ámbito (scope) que hace que la Stage 2 vea la sesión que acaba de terminar en lugar de la que acaba de empezar.

@@ -826,7 +826,13 @@ class MusicDataStore(
              * de reproducción (incluyendo el paso a PAUSA) para que el umbral de 15 min 
              * cuente desde el momento exacto de la inactividad.
              */
-            val shouldResetClock = identityChanged || playbackStatusChanged
+            val sessionIdentityChangedForClock = currentTitle != info.title ||
+                    currentArtist != info.artist ||
+                    currentPackageName != info.packageName
+
+            val oldShouldResetClock = identityChanged || playbackStatusChanged
+            val shouldResetClock = sessionIdentityChangedForClock || playbackStatusChanged
+            InternalLogger.d(context, "[IDENTITY_TRACE] Paso7_shouldResetClock: viejo=$oldShouldResetClock, nuevo=$shouldResetClock, coincide=${oldShouldResetClock == shouldResetClock}, sessionIdChanged=$sessionIdentityChangedForClock, playbackChanged=$playbackStatusChanged")
 
             if (shouldResetClock) {
                 prefs[LAST_UPDATE_EPOCH] = System.currentTimeMillis()

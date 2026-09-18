@@ -11,7 +11,7 @@
 
 ## DD1. ¿Qué evento dispara la resolución de una sesión marcada como "pendiente de compromiso"?
 
-La lectura de `isPendingCommit` ocurre durante la rehidratación del servicio en `onListenerConnected`:
+La lectura de `isPendingCommit` ocurre durante la rehidratación en `onListenerConnected`:
 
 ```kotlin
 1135:             InternalLogger.d(applicationContext, "[HIST_BOOT] SERVICE_ONCREATE: Iniciando rehidratación.")
@@ -19,18 +19,14 @@ La lectura de `isPendingCommit` ocurre durante la rehidratación del servicio en
 1137:             InternalLogger.d(applicationContext, "[HIST_BOOT] BOOT_DATA_READY: sessionUUID=${currentInfo.sessionUUID}")
 1138:             if (currentInfo.trackKey.isNotEmpty()) {
 ...
-1167:                 
-1168:                 // Si la sesión estaba en el limbo, notificamos para que el HistoryWorker esté alerta
-1169:                 if (currentInfo.isPendingCommit) {
-1170:                     InternalLogger.d(applicationContext, "[REHYDRATION] Sesión en el limbo recuperada (UUID=${currentInfo.sessionUUID}). Esperando reconciliación.")
-1171:                 }
-...
-1186:             }
+1168:                 
+1169:                 // Si la sesión estaba en el limbo, notificamos para que el HistoryWorker esté alerta
+1170:                 if (currentInfo.isPendingCommit) {
+1171:                     InternalLogger.d(applicationContext, "[REHYDRATION] Sesión en el limbo recuperada (UUID=${currentInfo.sessionUUID}). Esperando reconciliación.")
+1172:                 }
 ```
 
-**Análisis:**
-- El disparo es el **inicio/reinicio del proceso del Listener** (`onListenerConnected`).
-- No hay un temporizador propio para "mirar" sesiones pendientes; se detectan al arrancar y se resuelven en el primer `processSnapshot` que ocurra tras recibir metadatos vivos.
+**Disparador:** El inicio o reinicio del proceso del servicio (`onListenerConnected`). No existe un temporizador recurrente; la sesión se resuelve al recibir el primer snapshot vivo en `processSnapshot`.
 
 ---
 
@@ -52,44 +48,41 @@ Ubicada en `processSnapshot` (BLOQUE 6.1):
 2124:         }
 ```
 
-**Condición exacta:**
-1. La sesión actual debe estar marcada como `isProvisional` (estado post-boot).
-2. `identityChanged` debe ser `false` (la canción recibida del sistema es la misma que la que estaba persistida antes del reinicio).
+**Condición:** `session.isProvisional` (sesión rehidratada al arranque) y `!identityChanged` (la canción entrante coincide con la persistida).
 
 ---
 
 ## DD3. Código completo del consumidor de historial y su contador de "resurrections"
 
-El contador se incrementa en el bloque `catch` del bucle principal de `startHistoryWorker`:
+El contador se incrementa en el bloque `catch` del bucle principal en `startHistoryWorker`:
 
 ```kotlin
 717:     private fun startHistoryWorker() {
 718:         val workerId = System.identityHashCode(this)
 719:         serviceScope.launch(Dispatchers.IO + historyHandler) {
 ...
-760:                     InternalLogger.w(applicationContext, "[HIST_CONSUMER] [$workerId] CHANNEL_CLOSED_EXIT")
-761:                     break
-762:                 } catch (ce: CancellationException) {
-763:                     throw ce
-764:                 } catch (t: Throwable) {
-765:                     resurrectionsCount.incrementAndGet()
-766:                     InternalLogger.e(applicationContext, "[HIST_CONSUMER] [$workerId] LOOP_DEATH_RESURRECTING #${resurrectionsCount.get()}: ${t.message}")
-767:                     delay(500L)
-768:                 }
-769:             }
-770:             InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] CONSUMER_LOOP_EXIT")
-771:         }
-772:     }
+761:                     InternalLogger.w(applicationContext, "[HIST_CONSUMER] [$workerId] CHANNEL_CLOSED_EXIT")
+762:                     break
+763:                 } catch (ce: CancellationException) {
+764:                     throw ce
+765:                 } catch (t: Throwable) {
+766:                     resurrectionsCount.incrementAndGet()
+767:                     InternalLogger.e(applicationContext, "[HIST_CONSUMER] [$workerId] LOOP_DEATH_RESURRECTING #${resurrectionsCount.get()}: ${t.message}")
+768:                     delay(500L)
+769:                 }
+770:             }
+771:             InternalLogger.d(applicationContext, "[HIST_CONSUMER] [$workerId] CONSUMER_LOOP_EXIT")
+772:         }
+773:     }
 ```
 
-**Condición:**
-Cualquier error crítico (`Throwable`) distinto de una cancelación que provoque la muerte del bucle del canal de historial. El sistema incrementa el contador y reinicia el bucle tras un retardo de 500ms.
+**Condición:** Ocurre cuando el bucle de procesamiento del canal de historial muere por un error inesperado (`Throwable`), provocando el reinicio de la escucha.
 
 ---
 
 ## DD4. ¿El latido (`CONSUMER_HEARTBEAT`) depende de recibir algo externo para seguir funcionando?
 
-No, el latido tiene su propia corrutina independiente lanzada al inicio de `startHistoryWorker`:
+No, el latido es independiente. Se lanza como una corrutina hermana al inicio de `startHistoryWorker`:
 
 ```kotlin
 723:             // Heartbeat cada 60s (B1.4)
@@ -104,5 +97,4 @@ No, el latido tiene su propia corrutina independiente lanzada al inicio de `star
 732:             }
 ```
 
-**Confirmación:**
-El temporizador es propio (`delay(60000L)`) e independiente de avisos externos o la llegada de eventos al canal. Seguirá emitiendo mientras el `serviceScope` esté activo.
+**Confirmación:** Tiene su propio temporizador (`delay(60000L)`) y solo depende de que el `serviceScope` permanezca activo.

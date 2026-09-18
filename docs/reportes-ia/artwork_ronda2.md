@@ -1,4 +1,4 @@
-# Auditoría — Ronda 2 (Portadas): Destino del Retoque Atómico, y Nivel de Resolución Real para Canciones Normales
+# Auditoría — Ronda 2 (Portadas): Destino del Retoque Atómico, Nivel 1 en Casos Normales, y Reprocesamiento Rápido
 
 **Confirmación de Git Log:**
 ```
@@ -42,7 +42,7 @@ Ubicado en `MusicNotificationListener.kt` (dentro de `createSnapshot`).
 1785:                             }
 ```
 
-**Confirmación:** Escribe **únicamente** al archivo de historial identificado por el UUID de la sesión (`art_${session.sessionUUID}.webp`). **No** actualiza `musicDataStore` en este punto.
+**Confirmación:** Escribe **únicamente** al archivo de historial identificado por el UUID de la sesión (`art_${session.sessionUUID}.webp`). No actualiza `musicDataStore` (el registro que alimenta "ahora sonando") en este bloque.
 
 ---
 
@@ -67,7 +67,7 @@ Declarado en `MusicDataStore.kt` dentro de la clase `MusicInfo`:
 
 ## VV3. ¿El Nivel 1 (metadatos directos) depende de la misma construcción síncrona de `finalMusicInfo` que ya sabemos que no espera al Nivel 3?
 
-**SÍ, pero es síncrono.**
+**SÍ, es síncrono.**
 
 Analizando el flujo en `processSnapshot`:
 
@@ -76,9 +76,37 @@ Analizando el flujo en `processSnapshot`:
     2397:                 resolvedArtwork = kotlinx.coroutines.withTimeoutOrNull(ARTWORK_PROMOTION_TIMEOUT_MS) {
     2398:                     resolveArtworkDeduplicated(...)
     ```
-    Aquí, `resolveArtworkDeduplicated` llama a `findRealAlbumArt`. Esta llamada es **síncrona** (suspende la corrutina actual hasta que devuelve el bitmap o expira el tiempo de 3.5s).
+    Aquí, `resolveArtworkDeduplicated` llama a `getOrCreateArtworkDeferred`, el cual invoca a `findRealAlbumArt` (Nivel 1). Esta llamada está envuelta en un `withTimeoutOrNull` síncrono que suspende la corrutina.
 
 2.  **Construcción de `finalMusicInfo` (Línea 2543):**
     Esta línea se ejecuta **después** de que la fase de resolución anterior ha terminado y ha devuelto `resolvedArtwork`.
 
-**Confirmación:** Si el Nivel 1 (metadatos directos) tiene éxito, el resultado **está disponible** para la construcción de `finalMusicInfo` en el mismo ciclo. No hay una "carrera" entre el Nivel 1 y la construcción de la info; la única razón por la que no llegaría a tiempo es si la resolución completa excede el `ARTWORK_PROMOTION_TIMEOUT_MS` (3.5s), en cuyo caso se usaría el valor previo o un placeholder.
+**Confirmación:** Si el Nivel 1 (metadatos directos) tiene éxito, el resultado **está disponible** para la construcción de `finalMusicInfo` en el mismo ciclo.
+
+---
+
+## VV4. ¿Se llama a `findRealAlbumArt` en cada una de las "sesiones nuevas" de una misma ráfaga de recreación rápida?
+
+**Depende del estado de la resolución anterior.**
+
+Analizando `getOrCreateArtworkDeferred` (Línea 2862):
+
+```kotlin
+2869:         artworkInFlightMutex.withLock {
+2870:             artworkCache.get(artworkKey)?.let { bitmap ->
+2871:                 return CompletableDeferred(bitmap)
+2872:             }
+2873:             artworkInFlight[artworkKey]?.let { existing ->
+2874:                 if (existing.isActive) {
+2875:                     Log.d(TAG, "Artwork ya está en vuelo; reutilizando Deferred: $artworkKey")
+2876:                     return existing
+2877:                 }
+2878:                 artworkInFlight.remove(artworkKey)
+2879:             }
+```
+
+1.  **Caso de Éxito/Caché:** Si la primera sesión de la ráfaga logra guardar el resultado en `artworkCache` (Línea 2885), las sesiones posteriores para la misma canción (`artworkKey` idéntico) **heredan el resultado** inmediatamente de la caché (Línea 2871).
+2.  **Caso "En Vuelo":** Si la primera sesión lanzó la búsqueda pero aún no ha terminado, la segunda sesión **reutiliza el mismo `Deferred`** (Línea 2875), por lo que ambas esperan al mismo proceso único de `findRealAlbumArt`.
+3.  **Caso de Fallo:** Si el intento anterior terminó con error o `null`, se elimina de `artworkInFlight` (Línea 2878) y la siguiente sesión **dispara una nueva llamada** independiente a `findRealAlbumArt` (Línea 2880).
+
+**Resumen:** No disparan llamadas independientes si ya hay un éxito o una búsqueda activa para el mismo `artworkKey`. Solo reintentan si el anterior falló o fue cancelado.
