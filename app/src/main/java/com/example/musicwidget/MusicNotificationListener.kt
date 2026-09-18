@@ -2750,7 +2750,8 @@ class MusicNotificationListener : NotificationListenerService() {
         var showLyric = true
         while (currentCoroutineContext().isActive) {
             val currentRAM = MusicStateProvider.current()
-            if (currentRAM.trackKey != myTrackKey || currentRAM.isPlaying) break
+            val currentSessionId = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist)
+            if (currentSessionId != myTrackKey || currentRAM.isPlaying) break
             
             val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
             

@@ -108,7 +108,7 @@ object MusicStateProvider {
     }
 
     private fun reconcileLyric(current: MusicInfo, e: MusicUpdateEvent.LyricTick): MusicInfo {
-        if (e.trackKey != current.trackKey) return current
+        if (e.trackKey != MusicDataStore.computeSessionIdentity(current.packageName, current.title, current.artist)) return current
         
         return current.copy(
             currentLyric = e.lyric,
