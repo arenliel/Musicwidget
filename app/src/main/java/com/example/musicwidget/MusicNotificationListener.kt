@@ -2501,7 +2501,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
 
                     if (controller != null && metadata != null && 
-                        (trackChangedUI || artworkChangedUI || savedArtworkKey == null)) {
+                        (trackChangedUI || artworkChangedUI || savedArtworkKey == null || artIncoherent)) {
                         
                         if (resolvedArtwork != null) {
                             // Hallazgo v3.9: Warm-up de RAM (Zero-Lag)
