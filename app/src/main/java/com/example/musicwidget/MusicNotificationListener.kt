@@ -1556,6 +1556,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         if (
             reason != "catch_up_render" &&
+            savedArtworkKey == snapshot.artworkKey &&
             snapshot.contentKey ==
             lastObservedSnapshot
                 ?.contentKey
@@ -1566,6 +1567,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         if (
             reason != "catch_up_render" &&
+            savedArtworkKey == snapshot.artworkKey &&
             snapshot.contentKey ==
             inFlightSnapshot
                 ?.contentKey
@@ -1576,6 +1578,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         if (
             reason != "catch_up_render" &&
+            savedArtworkKey == snapshot.artworkKey &&
             snapshot.contentKey ==
             lastAppliedSnapshot
                 ?.contentKey
