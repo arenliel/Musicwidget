@@ -1923,7 +1923,7 @@ class MusicNotificationListener : NotificationListenerService() {
         kotlinx.coroutines.withTimeoutOrNull(BOOT_GATE_TIMEOUT_MS) { bootGate.await() }
             ?: InternalLogger.w(applicationContext, "[HIST_BOOT] BOOT_GATE_TIMEOUT: procesando paquete vivo ($reason) sin estado rehidratado")
 
-        val session = currentLogicalSession
+        var session = currentLogicalSession
         
         val stateName = when(rawSnapshot.playbackState) {
             PlaybackState.STATE_PLAYING -> "PLAYING"
@@ -2191,6 +2191,7 @@ class MusicNotificationListener : NotificationListenerService() {
             )
             InternalLogger.d(applicationContext, "[ART_TRACE] Sesión saliente antes de reemplazo: UUID=${session?.sessionUUID}, artworkKey=${session?.playbackContext?.artworkKey}")
             currentLogicalSession = newSession
+            session = newSession
             identityGenerationCounter++
             InternalLogger.d(applicationContext, "[ART_TRACE] Nueva generación de identidad: gen=$identityGenerationCounter, UUID=${newSession.sessionUUID}, Track=${rawSnapshot.title}")
             InternalLogger.d(applicationContext, "[FSM] Nueva Sesión Creada (UUID=${newSession.sessionUUID}): ${rawSnapshot.title}")
