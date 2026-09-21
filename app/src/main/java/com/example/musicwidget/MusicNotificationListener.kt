@@ -345,7 +345,7 @@ class MusicNotificationListener : NotificationListenerService() {
     /*
      * Artwork guardado actualmente en disco.
      */
-    private var savedArtworkKey: String? = null
+
 
     /*
      * Icono de la app guardado actualmente en disco.
@@ -701,7 +701,6 @@ class MusicNotificationListener : NotificationListenerService() {
                     lastLogicalSnapshot = null
                     lastObservedSnapshot = null
                     inFlightSnapshot = null
-                    savedArtworkKey = null
                     savedAppIconKey = null
                     
                     // 3. Sincronía Atómica: El observador startRamMirror actualizará la memoria (Fast-Track)
@@ -1123,10 +1122,11 @@ class MusicNotificationListener : NotificationListenerService() {
          * Al conectar, sincronizamos el estado del artwork guardado y reconstruimos punteros.
          */
         serviceScope.launch {
+            var rehydratedArtworkKey: String? = null
             val keyFile = File(filesDir, ALBUM_ART_KEY_FILE)
             if (keyFile.exists()) {
                 runCatching {
-                    savedArtworkKey = keyFile.readText().trim().takeIf { it.isNotEmpty() }
+                    rehydratedArtworkKey = keyFile.readText().trim().takeIf { it.isNotEmpty() }
                 }
             }
             val iconKeyFile = File(filesDir, APP_ICON_KEY_FILE)
@@ -1159,7 +1159,8 @@ class MusicNotificationListener : NotificationListenerService() {
                     playbackContext = PlaybackContext(
                         durationMs = currentInfo.durationMs,
                         album = currentInfo.album,
-                        artworkKey = currentInfo.artworkKey
+                        artworkKey = currentInfo.artworkKey,
+                        confirmedArtworkKey = rehydratedArtworkKey
                     ),
                     context = this@MusicNotificationListener
                 )
@@ -3280,7 +3281,6 @@ class MusicNotificationListener : NotificationListenerService() {
         lastObservedSnapshot = null
         lastAppliedSnapshot = null
         inFlightSnapshot = null
-        savedArtworkKey = null
         artworkCache.evictAll()
         iconVault.clear()
         lyricsUpdateJob?.cancel()
