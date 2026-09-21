@@ -159,7 +159,8 @@ class MusicNotificationListener : NotificationListenerService() {
     private data class PlaybackContext(
         val durationMs: Long,
         val album: String?,
-        val artworkKey: String
+        val artworkKey: String,
+        val confirmedArtworkKey: String? = null
     )
 
     /*
@@ -1556,7 +1557,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         if (
             reason != "catch_up_render" &&
-            savedArtworkKey == snapshot.artworkKey &&
+            currentLogicalSession?.playbackContext?.confirmedArtworkKey == snapshot.artworkKey &&
             snapshot.contentKey ==
             lastObservedSnapshot
                 ?.contentKey
@@ -1567,7 +1568,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         if (
             reason != "catch_up_render" &&
-            savedArtworkKey == snapshot.artworkKey &&
+            currentLogicalSession?.playbackContext?.confirmedArtworkKey == snapshot.artworkKey &&
             snapshot.contentKey ==
             inFlightSnapshot
                 ?.contentKey
@@ -1578,7 +1579,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         if (
             reason != "catch_up_render" &&
-            savedArtworkKey == snapshot.artworkKey &&
+            currentLogicalSession?.playbackContext?.confirmedArtworkKey == snapshot.artworkKey &&
             snapshot.contentKey ==
             lastAppliedSnapshot
                 ?.contentKey
@@ -2003,7 +2004,7 @@ class MusicNotificationListener : NotificationListenerService() {
         val isCatchUp = reason == "catch_up_render"
         
         // Detección de Incoherencia de Imagen: Si la portada en disco no coincide con la del snapshot, forzamos bypass
-        val artIncoherent = savedArtworkKey != rawSnapshot.artworkKey && isWidgetPotentiallyVisible()
+        val artIncoherent = session?.playbackContext?.confirmedArtworkKey != rawSnapshot.artworkKey && isWidgetPotentiallyVisible()
 
         // Hallazgo 4.1: RAM-Fringe Deduplication (v3.1)
         // Bloqueamos ráfagas antes de entrar al Mutex o realizar cálculos analíticos.
@@ -2221,7 +2222,8 @@ class MusicNotificationListener : NotificationListenerService() {
             val updatedContext = PlaybackContext(
                 durationMs = rawSnapshot.durationMs,
                 album = rawSnapshot.album,
-                artworkKey = rawSnapshot.artworkKey
+                artworkKey = rawSnapshot.artworkKey,
+                confirmedArtworkKey = session?.playbackContext?.confirmedArtworkKey
             )
             session?.let { s ->
                 s.liveSnapshot = rawSnapshot
@@ -2510,7 +2512,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
 
                     if (controller != null && metadata != null && 
-                        (trackChangedUI || artworkChangedUI || savedArtworkKey == null || artIncoherent)) {
+                        (trackChangedUI || artworkChangedUI || session?.playbackContext?.confirmedArtworkKey == null || artIncoherent)) {
                         
                         if (resolvedArtwork != null) {
                             // Hallazgo v3.9: Warm-up de RAM (Zero-Lag)
@@ -2521,7 +2523,7 @@ class MusicNotificationListener : NotificationListenerService() {
                             MusicWidget.bitmapCache.put(cacheKey, transportBitmap)
 
                             // Paso 3.2: CACHING DE TRANSFORMACIÓN
-                            if (savedArtworkKey != snapshot.artworkKey) {
+                            if (session?.playbackContext?.confirmedArtworkKey != snapshot.artworkKey) {
                                 // 1. Guardar versión RAW
                                 InternalLogger.d(applicationContext, "[ART_TRACE] Escribiendo archivo sincronizado: key=${snapshot.artworkKey}, UUID=${session?.sessionUUID}")
                                 saveBitmapToFile(resolvedArtwork, ALBUM_ART_RAW_FILE, applyPillTransform = false)
@@ -2530,7 +2532,7 @@ class MusicNotificationListener : NotificationListenerService() {
                                 saveBitmapToFile(resolvedArtwork, ALBUM_ART_FILE, applyPillTransform = true)
                                 
                                 saveTextToFile(snapshot.artworkKey, ALBUM_ART_KEY_FILE)
-                                savedArtworkKey = snapshot.artworkKey
+                                session?.let { it.playbackContext = it.playbackContext.copy(confirmedArtworkKey = snapshot.artworkKey) }
 
                                 // Hallazgo v4.2: Artwork Relay (Inyección de Píxeles)
                                 // Inyectamos el bitmap en el snapshot lógico para que la próxima 
@@ -2545,7 +2547,7 @@ class MusicNotificationListener : NotificationListenerService() {
                             saveBitmapToFile(placeholder, ALBUM_ART_RAW_FILE, applyPillTransform = false)
                             saveBitmapToFile(placeholder, ALBUM_ART_FILE, applyPillTransform = true)
                             saveTextToFile("", ALBUM_ART_KEY_FILE)
-                            savedArtworkKey = null
+                            session?.let { it.playbackContext = it.playbackContext.copy(confirmedArtworkKey = null) }
                         }
 
                         if (resolvedAppIconFinal != null && resolvedIconKey != null) {
