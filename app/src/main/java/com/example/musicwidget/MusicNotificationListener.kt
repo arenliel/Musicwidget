@@ -1923,6 +1923,11 @@ class MusicNotificationListener : NotificationListenerService() {
         kotlinx.coroutines.withTimeoutOrNull(BOOT_GATE_TIMEOUT_MS) { bootGate.await() }
             ?: InternalLogger.w(applicationContext, "[HIST_BOOT] BOOT_GATE_TIMEOUT: procesando paquete vivo ($reason) sin estado rehidratado")
 
+        // NOTE (Conjunto Artwork-Stabilization Fase 3): must remain `var`, not `val`. This local
+        // reference is intentionally reassigned to `newSession` right after a session replacement
+        // (see line ~2194) so that downstream MusicInfo construction blocks in this same invocation
+        // read the incoming song's identity, not the outgoing one. Reverting to `val` silently
+        // reintroduces stale trackKey/sessionUUID on the first update of every new track.
         var session = currentLogicalSession
         
         val stateName = when(rawSnapshot.playbackState) {
