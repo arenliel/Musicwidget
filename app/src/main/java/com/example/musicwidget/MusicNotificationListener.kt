@@ -844,7 +844,8 @@ class MusicNotificationListener : NotificationListenerService() {
             // FÓRMULA DE SKIP PURA (v6.5): Basada exclusivamente en el progreso del Snapshot final
             // v7.0: Blindaje contra división por cero (UNKNOWN)
             var isSkipped = progressFactor in 0.0f..0.4f
-            
+            val rawIsSkipped = isSkipped // Veredicto crudo, sin perdón — para la racha de repetición
+
             InternalLogger.d(applicationContext, "[DIAG_V6] [SKIP_MATH] Track=${endSnapshot.title}, FinalPos=${finalPos}ms, Duration=${effectiveDuration}ms, Factor=$progressFactor, Verdict=$isSkipped")
 
             val currentRAM = MusicStateProvider.current()
@@ -865,7 +866,7 @@ class MusicNotificationListener : NotificationListenerService() {
             lastProcessedSessionUUID = sessionUUID
 
             val newStreak = musicDataStore.updateSkipStreak(startSnapshot.title, startSnapshot.artist, isSkipped)
-            val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, isSkipped)
+            val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, rawIsSkipped)
             if (!isSkipped && !isPartial) musicDataStore.updateArtistStats(startSnapshot.artist)
 
             val historyItem = HistoryItem(
@@ -2101,9 +2102,23 @@ class MusicNotificationListener : NotificationListenerService() {
                          progressFactor > 0.95f && 
                          !identityChanged
 
-        // DECISIÓN ESTRUCTURAL: Solo rompemos la sesión si cambió la canción, loop o reinicio manual.
-        // v9.0: isManualRewind ignorado si es provisional para evitar skips al boot (Bloque D.3)
-        val sessionEnded = identityChanged || isRealLoop || (isManualRewind && session?.isProvisional == false)
+        // Conjunto Rebobinado-1: un rebobinado o loop genuino ya no cierra la escucha —
+        // solo alimenta la racha de repetición si ya se había cruzado el umbral de escucha
+        // válida ANTES del salto (usando maxPositionMs, la marca de agua ya acumulada —
+        // nunca la posición recién saltada, que siempre estará cerca de 0).
+        val progressBeforeJump = if (session != null && session.playbackContext.durationMs > 0) {
+            session.maxPositionMs.toFloat() / session.playbackContext.durationMs.toFloat()
+        } else 0f
+        val isValidRepeatReplay = (isManualRewind || isRealLoop) && progressBeforeJump > 0.4f && session?.isProvisional == false
+        if (isValidRepeatReplay) {
+            serviceScope.launch {
+                musicDataStore.updateRepeatStats(rawSnapshot.title, rawSnapshot.artist, isSkip = false)
+            }
+        }
+
+        // DECISIÓN ESTRUCTURAL: Solo rompemos la sesión si cambió la canción de verdad.
+        // v9.0: Rebobinado y loop ya no cierran la escucha (Conjunto Rebobinado-1)
+        val sessionEnded = identityChanged
         
         // REGLA D.2: Monotonía de la marca de agua. Sede única: LogicalSession.
         session?.let { s ->
