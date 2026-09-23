@@ -1579,6 +1579,12 @@ class MusicNotificationListener : NotificationListenerService() {
             )
                 ?: return
 
+        // Conjunto Artwork-Stabilization (Fase 2): each of the next 3 duplicate-content guards
+        // now also requires the confirmed artwork key to already match the incoming snapshot's.
+        // Without this, a desynced artwork (e.g. after a cancelled resolution) could get stuck
+        // for minutes: the content otherwise "looks identical" to what was last observed, so
+        // these guards would keep discarding every update before it ever reached processSnapshot
+        // — never giving the Fase 1 self-heal (artIncoherent) a chance to run.
         if (
             reason != "catch_up_render" &&
             currentLogicalSession?.playbackContext?.confirmedArtworkKey == snapshot.artworkKey &&
@@ -2562,6 +2568,14 @@ class MusicNotificationListener : NotificationListenerService() {
                         return@withLock
                     }
 
+                    // Conjunto Artwork-Stabilization (Fase 1): `artIncoherent` was added to this
+                    // OR condition. Without it, if the FIRST attempt to write a track's artwork
+                    // got cancelled (e.g. a newer MediaSession event arrived mid-resolution),
+                    // no LATER invocation of the same track would ever retry — trackChangedUI
+                    // and artworkChangedUI only detect a difference from the PREVIOUS in-memory
+                    // snapshot, not from what's actually confirmed on disk. `artIncoherent`
+                    // checks against disk directly, so it's the only condition here that lets
+                    // the system self-heal a desynced artwork without waiting for the next song.
                     if (controller != null && metadata != null && 
                         (trackChangedUI || artworkChangedUI || session?.playbackContext?.confirmedArtworkKey == null || artIncoherent)) {
                         

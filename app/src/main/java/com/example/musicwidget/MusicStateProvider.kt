@@ -108,6 +108,12 @@ object MusicStateProvider {
     }
 
     private fun reconcileLyric(current: MusicInfo, e: MusicUpdateEvent.LyricTick): MusicInfo {
+        // Conjunto Identidad-Final (regresión post-Parte 1): this must compare sessionIdentity, never
+        // trackKey. trackKey includes duration, which frequently arrives late or gets corrected —
+        // comparing against it here made every duration correction look like a track change, silently
+        // killing the displayed lyric (the artist name kept showing, but the lyric line went blank)
+        // even though the Zombie Detector upstream had already been fixed to ignore duration-only
+        // changes. Same root cause, found again downstream where it hadn't been fixed yet.
         if (e.trackKey != MusicDataStore.computeSessionIdentity(current.packageName, current.title, current.artist)) return current
         
         return current.copy(
