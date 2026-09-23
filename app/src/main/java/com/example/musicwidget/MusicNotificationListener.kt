@@ -160,6 +160,15 @@ class MusicNotificationListener : NotificationListenerService() {
         val durationMs: Long,
         val album: String?,
         val artworkKey: String,
+        /**
+         * Conjunto Artwork-Stabilization (Fase 4/5): the artwork key MediaSession/Metrolist last
+         * suggested is NOT the same as what's actually confirmed and persisted to disk.
+         * [artworkKey] can update the instant a new metadata event arrives; this field only
+         * updates once [saveTextToFile] for ALBUM_ART_KEY_FILE actually succeeds. All
+         * sync-decision code (artIncoherent, the write-gate, the DIAG_V7_KEY dedup guards)
+         * must read THIS field, never [artworkKey] — reading the wrong one reintroduces the
+         * "confirmed identity treated as stale" bug this whole conjunto exists to fix.
+         */
         val confirmedArtworkKey: String? = null
     )
 
@@ -342,9 +351,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 Deferred<Bitmap?>
                 >()
 
-    /*
-     * Artwork guardado actualmente en disco.
-     */
+    // Conjunto Artwork-Stabilization (Fase 5): `savedArtworkKey` (a loose service-wide variable)
+    // was removed entirely. Its job — "what artwork key is confirmed on disk right now" — now
+    // belongs to `session.playbackContext.confirmedArtworkKey`, scoped to the song it actually
+    // describes instead of a single shared slot that any song could overwrite or misread.
 
 
     /*
@@ -867,6 +877,12 @@ class MusicNotificationListener : NotificationListenerService() {
             lastProcessedOutcome = outcome
             lastProcessedSessionUUID = sessionUUID
 
+            // Conjunto Rebobinado-1: el contador de saltos SÍ debe usar el veredicto ya
+            // perdonado (`isSkipped`) — Bendecida existe para proteger el historial de un
+            // accidente. Pero la racha de repetición debe usar el veredicto crudo
+            // (`rawIsSkipped`) — perdonar un salto no debería fabricar una escucha que nunca
+            // ocurrió. Mezclar estos dos (usar el mismo veredicto para ambos) es exactamente
+            // el bug que causaba que la racha se inflara de más sin razón aparente.
             val newStreak = musicDataStore.updateSkipStreak(startSnapshot.title, startSnapshot.artist, isSkipped)
             val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, rawIsSkipped)
             if (!isSkipped && !isPartial) musicDataStore.updateArtistStats(startSnapshot.artist)
@@ -2112,6 +2128,12 @@ class MusicNotificationListener : NotificationListenerService() {
         // solo alimenta la racha de repetición si ya se había cruzado el umbral de escucha
         // válida ANTES del salto (usando maxPositionMs, la marca de agua ya acumulada —
         // nunca la posición recién saltada, que siempre estará cerca de 0).
+        // ADVERTENCIA DE DISEÑO: NO reemplaces esto por `progressFactor`. `progressFactor` mide
+        // la posición del snapshot que ACABA de llegar — justo tras un rebobinado o loop, esa
+        // posición siempre está cerca de 0, así que esta condición nunca se cumpliría. Se
+        // necesita `maxPositionMs`: el punto más lejano alcanzado ANTES del salto. Este error
+        // ya se cometió una vez en el diseño original de este bloque y fue atrapado por la
+        // cláusula de alto del agente antes de implementarse — no lo repitas.
         val progressBeforeJump = if (session != null && session.playbackContext.durationMs > 0) {
             session.maxPositionMs.toFloat() / session.playbackContext.durationMs.toFloat()
         } else 0f
@@ -2126,6 +2148,11 @@ class MusicNotificationListener : NotificationListenerService() {
 
         // DECISIÓN ESTRUCTURAL: Solo rompemos la sesión si cambió la canción de verdad.
         // v9.0: Rebobinado y loop ya no cierran la escucha (Conjunto Rebobinado-1)
+        // Antes de este conjunto, `isManualRewind`/`isRealLoop` también disparaban esto,
+        // fragmentando una sola escucha en varias sesiones/entradas de historial. Ver
+        // `isValidRepeatReplay` unas líneas arriba: ese es el reemplazo correcto para
+        // "esto merece contar como una repetición" — nunca vuelvas a agregar rewind/loop
+        // a esta condición para lograrlo.
         val sessionEnded = identityChanged
         
         // REGLA D.2: Monotonía de la marca de agua. Sede única: LogicalSession.
