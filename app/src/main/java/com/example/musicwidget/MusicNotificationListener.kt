@@ -1035,9 +1035,14 @@ class MusicNotificationListener : NotificationListenerService() {
                         eagerArtworkPaths[artworkKey] = finalPath
 
                         // REACTIVE UPDATE: Manejo de condición de carrera (Skip tardío)
+                        // Conjunto RAM-Identica-1: added a trackKey match alongside artworkKey.
+                        // Two pending history entries from the same album could share an
+                        // artworkKey; without also matching trackKey (which already encodes
+                        // title+artist+duration), this could update the wrong entry's artwork
+                        // status.
                         val currentHistory = MusicStateProvider.current().history
                         val pendingItem = currentHistory.find { 
-                            it.artworkKey == artworkKey && it.hasPendingArtwork 
+                            it.artworkKey == artworkKey && it.trackKey == snapshot.trackKey && it.hasPendingArtwork 
                         }
 
                         if (pendingItem != null) {
@@ -2033,12 +2038,27 @@ class MusicNotificationListener : NotificationListenerService() {
         // REGLA VIP: Si vienes de un Catch-up, ignoramos la deduplicación para forzar el renderizado visual.
         val isCatchUp = reason == "catch_up_render"
         
-        // Detección de Incoherencia de Imagen: Si la portada en disco no coincide con la del snapshot, forzamos bypass
-        val artIncoherent = session?.playbackContext?.confirmedArtworkKey != rawSnapshot.artworkKey && isWidgetPotentiallyVisible()
+        // Conjunto RAM-Identica-1: `sessionChanged` added here too. At this exact point in the
+        // function, `session` still refers to the OUTGOING song (the replacement to `newSession`
+        // hasn't happened yet) — if the outgoing song happens to share its artwork with the
+        // incoming one (common within the same album), the raw key comparison alone wrongly says
+        // "coherent," even though the incoming song is about to become a brand-new session with
+        // no confirmed key of its own. Treating a genuine identity change as always incoherent
+        // forces a real, fresh artwork resolution for the NEW session (using its own sessionUUID)
+        // instead of silently inheriting the outgoing song's already-published artwork file.
+        val artIncoherent = (session?.playbackContext?.confirmedArtworkKey != rawSnapshot.artworkKey || sessionChanged) && isWidgetPotentiallyVisible()
 
         // Hallazgo 4.1: RAM-Fringe Deduplication (v3.1)
+        // Conjunto RAM-Identica-1: added `!sessionChanged`. `trackContentChanged` only compares
+        // artworkKey — two different tracks from the same album sharing artwork looked
+        // "identical" to it, so a genuine song change could be silently discarded here forever,
+        // with no self-heal other than a playback-state flip (pause/resume). `sessionChanged`
+        // (already computed above, comparing the ACTIVE session's identity — title+artist — to
+        // the incoming snapshot) is the correct signal to prevent that: reused here, not
+        // recomputed, and without touching `trackContentChanged`'s own correct meaning for its
+        // other uses elsewhere in this function.
         // Bloqueamos ráfagas antes de entrar al Mutex o realizar cálculos analíticos.
-        if (!isCatchUp && !trackContentChanged && !artIncoherent && 
+        if (!isCatchUp && !trackContentChanged && !sessionChanged && !artIncoherent && 
             currentMem.isPlaying == (rawSnapshot.playbackState == PlaybackState.STATE_PLAYING) && 
             currentMem.isSessionActive == rawSnapshot.isSessionActive) {
             
@@ -2553,7 +2573,17 @@ class MusicNotificationListener : NotificationListenerService() {
                 }
             }
 
-            val isStillRelevant = snapshot.artworkKey == lastObservedSnapshot?.artworkKey
+            // Conjunto RAM-Identica-1: added an identity check alongside the artwork-key match.
+            // A result was previously accepted as "still relevant" just because the artwork key
+            // matched — but two different tracks from the same album share that key too, so a
+            // stale resolution could be misapplied to a brand-new song. Now it also requires the
+            // title+artist identity of this invocation's own snapshot to still match what the
+            // rest of the system last observed.
+            val isStillRelevant = snapshot.artworkKey == lastObservedSnapshot?.artworkKey &&
+                lastObservedSnapshot?.let {
+                    MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
+                        MusicDataStore.computeSessionIdentity(it.packageName, it.title, it.artist)
+                } == true
             if (myGeneration != generation.get() && !isStillRelevant) {
                 Log.d(TAG, "[DIAGNOSTIC] ABORT_EARLY: #$myGeneration is obsolete (current gen: ${generation.get()})")
                 return
@@ -2562,7 +2592,14 @@ class MusicNotificationListener : NotificationListenerService() {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
                 commitMutex.withLock {
 
-                    val isStillRelevantInLock = snapshot.artworkKey == lastObservedSnapshot?.artworkKey
+                    // Conjunto RAM-Identica-1: same identity check as ABORT_EARLY above, for the
+                    // same reason — artwork key alone isn't enough to confirm this is still the
+                    // same song when two different tracks can share it.
+                    val isStillRelevantInLock = snapshot.artworkKey == lastObservedSnapshot?.artworkKey &&
+                        lastObservedSnapshot?.let {
+                            MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
+                                MusicDataStore.computeSessionIdentity(it.packageName, it.title, it.artist)
+                        } == true
                     if (myGeneration != generation.get() && !isStillRelevantInLock) {
                         Log.d(TAG, "[DIAGNOSTIC] ABORT_IN_LOCK: #$myGeneration is obsolete (current gen: ${generation.get()})")
                         return@withLock
@@ -3014,7 +3051,14 @@ class MusicNotificationListener : NotificationListenerService() {
                     
                     // Solo guardamos en caché si la sesión sigue siendo relevante para esta generación
                     // o si es una petición de historial (generation == -1)
-                    val isStillRelevant = artworkKey == lastObservedSnapshot?.artworkKey
+                    // Conjunto RAM-Identica-1: same identity check as the two ABORT guards in
+                    // processSnapshot — `artworkKey` alone can't distinguish two different tracks
+                    // from the same album that happen to share it.
+                    val isStillRelevant = artworkKey == lastObservedSnapshot?.artworkKey &&
+                        lastObservedSnapshot?.let {
+                            MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
+                                MusicDataStore.computeSessionIdentity(it.packageName, it.title, it.artist)
+                        } == true
                     val isHistoryRescue = generation == -1L
                     
                     if (isActive && (generation == this@MusicNotificationListener.generation.get() || isStillRelevant || isHistoryRescue) && bitmap != null) {
