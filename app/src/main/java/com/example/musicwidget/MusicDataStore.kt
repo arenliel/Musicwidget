@@ -1218,6 +1218,8 @@ class MusicDataStore(
             stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 14)
         }
 
+        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=$playsToday, skipStreak=$skipStreak, isFrequent=$isFrequent")
+
         return Triple(playsToday, skipStreak, isFrequent)
     }
 }

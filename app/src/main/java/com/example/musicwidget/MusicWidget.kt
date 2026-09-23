@@ -531,6 +531,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     }
                 }
                 if (item.title.isNotEmpty()) {
+                    InternalLogger.d(context, "[STREAK_TRACE] Render: origen=historial, identity=${item.title}|${item.artist}, skipStreak=${item.skipStreak}, playsToday=${item.playsToday}, streakDays=${item.streakDays}")
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (item.streakDays >= 3) DesignBadge(iconRes = R.drawable.replay_24px, label = "${item.streakDays}d", isTonal = true)
                         else if (item.playsToday >= 3) DesignBadge(iconRes = R.drawable.mode_heat_24px, label = "${item.playsToday}x", isTonal = true)
@@ -554,6 +555,9 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         // OCULTAMIENTO EN ESTADO VACÍO (v1.7.0)
         if (info.isEmpty) return
         
+        val context = LocalContext.current
+        InternalLogger.d(context, "[STREAK_TRACE] Render: origen=now_playing, identity=${info.title}|${info.artist}, skipStreak=${info.skipStreak}, playsToday=${info.playsToday}, isFrequentArtist=${info.isFrequentArtist}")
+
         val badge = when {
             info.streakDays >= 3 -> Pair(R.drawable.replay_24px, "${info.streakDays}d")
             info.playsToday >= 3 -> Pair(R.drawable.mode_heat_24px, "${info.playsToday}x")

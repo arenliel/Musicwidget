@@ -851,6 +851,8 @@ class MusicNotificationListener : NotificationListenerService() {
             val currentRAM = MusicStateProvider.current()
             val isBlessed = currentRAM.history.any { it.trackKey == trackKey && !it.isSkipped }
             if (isBlessed && isSkipped) isSkipped = false
+            
+            InternalLogger.d(applicationContext, "[STREAK_TRACE] Bendecida: track=$trackKey, isBlessed=$isBlessed, rawIsSkipped=$rawIsSkipped, isSkippedPostPerdon=$isSkipped")
 
             val isPartial = !isSkipped && progressFactor < 0.85f
 
@@ -868,6 +870,8 @@ class MusicNotificationListener : NotificationListenerService() {
             val newStreak = musicDataStore.updateSkipStreak(startSnapshot.title, startSnapshot.artist, isSkipped)
             val repeatAnalytics = musicDataStore.updateRepeatStats(startSnapshot.title, startSnapshot.artist, rawIsSkipped)
             if (!isSkipped && !isPartial) musicDataStore.updateArtistStats(startSnapshot.artist)
+            
+            InternalLogger.d(applicationContext, "[STREAK_TRACE] Consumidores: identity=${startSnapshot.title}|${startSnapshot.artist}, newSkipStreak=$newStreak, playsToday=${repeatAnalytics.first}, streakDays=${repeatAnalytics.second}, updateArtistStatsLlamado=${!isSkipped && !isPartial}")
 
             val historyItem = HistoryItem(
                 title = endSnapshot.title,
@@ -887,6 +891,8 @@ class MusicNotificationListener : NotificationListenerService() {
                 hasPendingArtwork = !hasArtwork,
                 identitySchemaVersion = MusicDataStore.CURRENT_IDENTITY_VERSION
             )
+            
+            InternalLogger.d(applicationContext, "[STREAK_TRACE] HistoryItem a guardar: trackKey=${historyItem.trackKey}, isSkipped=${historyItem.isSkipped}, skipStreak=${historyItem.skipStreak}, playsToday=${historyItem.playsToday}, streakDays=${historyItem.streakDays}")
             
             musicDataStore.addToHistory(historyItem)
             
@@ -2111,8 +2117,10 @@ class MusicNotificationListener : NotificationListenerService() {
         } else 0f
         val isValidRepeatReplay = (isManualRewind || isRealLoop) && progressBeforeJump > 0.4f && session?.isProvisional == false
         if (isValidRepeatReplay) {
+            InternalLogger.d(applicationContext, "[STREAK_TRACE] Disparador de rebobinado: track=${rawSnapshot.title}, progressBeforeJump=$progressBeforeJump, esManualRewind=$isManualRewind, esLoop=$isRealLoop")
             serviceScope.launch {
                 musicDataStore.updateRepeatStats(rawSnapshot.title, rawSnapshot.artist, isSkip = false)
+                InternalLogger.d(applicationContext, "[STREAK_TRACE] Disparador de rebobinado: updateRepeatStats ejecutado para ${rawSnapshot.title}")
             }
         }
 
