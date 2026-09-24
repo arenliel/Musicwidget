@@ -1232,8 +1232,15 @@ class MusicNotificationListener : NotificationListenerService() {
             val initialControllers = mediaSessionManager.getActiveSessions(componentName)
             updateActiveSessions(initialControllers)
 
+            // Conjunto Reconexión-1: antes, esta llamada corría en su propia corrutina,
+            // en paralelo con la que updateActiveSessions() ya había disparado unas líneas
+            // arriba (vía requestRefresh -> pendingRefreshJob) — dos revisiones de la misma
+            // canción, sin coordinarse, podían pisarse entre sí y dejar la portada
+            // desincronizada por hasta un minuto. Usar requestRefresh aquí también asegura
+            // que ambas compitan por el MISMO trabajo pendiente: la más reciente cancela
+            // automáticamente a la anterior, en vez de que las dos corran a la vez.
             // VERIFICACIÓN DE ESTADO INICIAL: Refrescar si hay discrepancia inmediata
-            refreshBestSession(reason = "listener_reconnected")
+            requestRefresh(fast = true, reason = "listener_reconnected")
             
             // Sincronizamos la marca de tiempo para evitar rate-limit inmediato
             lastPreviewUpdate = System.currentTimeMillis()
