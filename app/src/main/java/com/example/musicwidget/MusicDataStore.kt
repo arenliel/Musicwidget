@@ -1080,7 +1080,7 @@ class MusicDataStore(
      * renueva o crea la bendición. Un salto perdonado hoy no renueva la bendición por
      * sí mismo — eso fabricaría protección sin una escucha real de por medio.
      */
-    suspend fun updateBlessedStatus(title: String, artist: String, rawIsSkipped: Boolean): Boolean {
+    suspend fun updateBlessedStatus(title: String, artist: String, isCompleted: Boolean): Boolean {
         var wasBlessed = false
         context.dataStore.edit { prefs ->
             val statsMap = decodeBlessedSongs(prefs[BLESSED_SONGS].orEmpty()).toMutableMap()
@@ -1092,7 +1092,10 @@ class MusicDataStore(
             wasBlessed = existing != null && (gapDays == null || gapDays <= 14)
             InternalLogger.log(context, "[STREAK_TRACE] Bendecida lectura: identity=$identity, existeAnterior=${existing != null}, gapDias=$gapDays, wasBlessed=$wasBlessed, expiroPorVencimiento=${existing != null && gapDays != null && gapDays > 14}")
 
-            if (!rawIsSkipped) {
+            // Conjunto Bendecida-2: solo una escucha COMPLETA (>=85%) renueva la bendición —
+            // antes, cualquier cosa que no fuera un salto (incluyendo parciales, 40%-85%)
+            // también la renovaba, más generoso de lo que se pretendía originalmente.
+            if (isCompleted) {
                 statsMap[identity] = BlessedSong(lastCompletedEpochDay = today)
             }
 
@@ -1108,7 +1111,7 @@ class MusicDataStore(
                 newObj.put(k, inner)
             }
             prefs[BLESSED_SONGS] = newObj.toString()
-            InternalLogger.log(context, "[STREAK_TRACE] Bendecida guardado: identity=$identity, seRenovoEstaVez=${!rawIsSkipped}, tamañoMapa=${statsMap.size}")
+            InternalLogger.log(context, "[STREAK_TRACE] Bendecida guardado: identity=$identity, seRenovoEstaVez=$isCompleted, tamañoMapa=${statsMap.size}")
         }
         return wasBlessed
     }

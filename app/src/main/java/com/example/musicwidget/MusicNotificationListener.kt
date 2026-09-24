@@ -862,7 +862,12 @@ class MusicNotificationListener : NotificationListenerService() {
             // comparaba por trackKey, incluyendo duración — inestable entre reproducciones de
             // la misma canción) por la caja permanente y dedicada en MusicDataStore, que
             // identifica solo por título+artista y tiene su propio vencimiento de 14 días.
-            val isBlessed = musicDataStore.updateBlessedStatus(startSnapshot.title, startSnapshot.artist, rawIsSkipped)
+            // Conjunto Bendecida-2: antes, "Bendecida" se renovaba con cualquier escucha que no
+            // fuera un salto — es decir, también con escuchas PARCIALES (40%-85%). La intención
+            // original era que solo una escucha COMPLETA (85% o más) blindara la canción. Se usa
+            // progressFactor directamente aquí porque `isPartial` todavía no existe en este punto
+            // de la función (se calcula más abajo, después de este llamado).
+            val isBlessed = musicDataStore.updateBlessedStatus(startSnapshot.title, startSnapshot.artist, isCompleted = progressFactor >= 0.85f)
             if (isBlessed && isSkipped) isSkipped = false
             
             InternalLogger.d(applicationContext, "[STREAK_TRACE] Bendecida: track=$trackKey, isBlessed=$isBlessed, rawIsSkipped=$rawIsSkipped, isSkippedPostPerdon=$isSkipped")
