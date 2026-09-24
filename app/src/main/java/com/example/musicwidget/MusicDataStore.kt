@@ -252,6 +252,14 @@ data class ArtistStats(
 )
 
 /**
+ * Registro de una canción "Bendecida": ya se escuchó completa o parcialmente
+ * (nunca saltada) al menos una vez, dentro de la ventana de vigencia.
+ */
+data class BlessedSong(
+    val lastCompletedEpochDay: Long = 0L
+)
+
+/**
  * Identidad visual de la racha/repetición.
  */
 enum class RepeatBadge {
@@ -416,6 +424,11 @@ class MusicDataStore(
                 "artist_stats"
             )
 
+        private val BLESSED_SONGS =
+            stringPreferencesKey(
+                "blessed_songs"
+            )
+
         /**
          * REGLA F.1 (Orden v9): Control de reseteo masivo de rachas.
          * Activarlo únicamente bajo confirmación del usuario para sanear conteos del Incidente K.
@@ -573,7 +586,7 @@ class MusicDataStore(
                         val stats = statsMap[key]
                         val today = java.time.LocalDate.now().toEpochDay()
                         
-                        stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 14)
+                        stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 30)
                     }
                 }
             )
@@ -590,6 +603,21 @@ class MusicDataStore(
                     distinctDaysHeard = inner.getInt("dd"),
                     lastPlayedEpochDay = inner.getLong("lp")
                 )
+            }
+            map
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun decodeBlessedSongs(json: String): Map<String, BlessedSong> {
+        if (json.isBlank()) return emptyMap()
+        return try {
+            val obj = JSONObject(json)
+            val map = mutableMapOf<String, BlessedSong>()
+            obj.keys().forEach { key ->
+                val inner = obj.getJSONObject(key)
+                map[key] = BlessedSong(lastCompletedEpochDay = inner.getLong("lp"))
             }
             map
         } catch (e: Exception) {
@@ -860,29 +888,23 @@ class MusicDataStore(
                 InternalLogger.log(context, "LRU: Repetición detectada. Moviendo a la cima: ${item.title}")
             }
 
-            // 2. Aplicar Escudo de Protección: Si ya fue escuchada completa, ignoramos el skip actual
-            val isBlessed = existingItem != null && !existingItem.isSkipped
-            
-            val finalItem = if (isBlessed && item.isSkipped) {
-                item.copy(isSkipped = false, skipStreak = 0)
-            } else {
-                item
-            }
+            // Conjunto Bendecida-1: se eliminó el segundo mecanismo de "Bendecida" que vivía
+            // aquí (comparaba contra este mismo historial, limitado a solo 10 canciones).
+            // commitToHistory ya consultó la fuente única de verdad
+            // (musicDataStore.updateBlessedStatus) antes de construir `item` — item.isSkipped
+            // ya refleja el perdón correcto, así que se usa `item` tal cual, sin reevaluarlo
+            // ni volver a limpiar la racha de saltos aquí (updateSkipStreak ya la resetea sola
+            // cuando isSkipped es false).
 
-            // 3. Filtrar coincidencia previa para mover a la cima (LRU) - Usar sessionIdentity
+            // 2. Filtrar coincidencia previa para mover a la cima (LRU) - Usar sessionIdentity
             val listWithoutDuplicate = oldHistory.filterNot {
                 it.sessionIdentity == item.sessionIdentity
             }
 
-            // 4. Insertar al principio y limitar a los últimos 10
-            val newHistory = (listOf(finalItem) + listWithoutDuplicate).take(10)
+            // 3. Insertar al principio y limitar a los últimos 10
+            val newHistory = (listOf(item) + listWithoutDuplicate).take(10)
             
             prefs[HISTORY] = encodeHistory(newHistory)
-
-            // 5. Sincronización de Rachas: Si es bendecida, limpiamos la racha persistente
-            if (isBlessed) {
-                resetSkipStreakInternal(prefs, item.title, item.artist)
-            }
         }
     }
 
@@ -929,16 +951,27 @@ class MusicDataStore(
         var newStreak = 0
         context.dataStore.edit { prefs ->
             val json = prefs[SKIP_STREAKS].orEmpty()
-            val map = mutableMapOf<String, Int>()
+            // Conjunto Bendecida-1: el formato cambia de "identity -> count" a
+            // "identity -> {c: count, lp: lastSkippedEpochDay}". Antes no existía ninguna fecha
+            // asociada a la racha de saltos, así que un salto de hace meses contaba igual que
+            // uno de ayer. Ahora, si pasaron más de 14 días desde el último salto de esa
+            // canción, la racha se trata como si empezara de cero.
+            val map = mutableMapOf<String, Pair<Int, Long>>() // count to lastSkippedEpochDay
             if (json.isNotBlank()) {
                 runCatching {
                     val obj = JSONObject(json)
-                    obj.keys().forEach { key -> map[key] = obj.getInt(key) }
+                    obj.keys().forEach { key ->
+                        val inner = obj.getJSONObject(key)
+                        map[key] = inner.getInt("c") to inner.getLong("lp")
+                    }
                 }
             }
 
             val identity = "$title|$artist"
-            val currentStreak = map[identity] ?: 0
+            val today = java.time.LocalDate.now().toEpochDay()
+            val existing = map[identity]
+            val gapDays = existing?.let { today - it.second }
+            val currentStreak = if (existing != null && (gapDays == null || gapDays <= 14)) existing.first else 0
 
             newStreak = when {
                 isSkip -> currentStreak + 1
@@ -946,19 +979,24 @@ class MusicDataStore(
             }
 
             if (newStreak > 0) {
-                map[identity] = newStreak
+                map[identity] = newStreak to today
             } else {
                 map.remove(identity)
             }
 
-            // Limpieza LRU básica: mantener solo los últimos 30 registros de racha
-            if (map.size > 30) {
-                val keysToRemove = map.keys.take(map.size - 30)
+            // Limpieza LRU básica: mantener solo los últimos 200 registros de racha
+            if (map.size > 200) {
+                val keysToRemove = map.keys.take(map.size - 200)
                 keysToRemove.forEach { map.remove(it) }
             }
 
             val newObj = JSONObject()
-            map.forEach { (k, v) -> newObj.put(k, v) }
+            map.forEach { (k, v) ->
+                val inner = JSONObject()
+                inner.put("c", v.first)
+                inner.put("lp", v.second)
+                newObj.put(k, inner)
+            }
             prefs[SKIP_STREAKS] = newObj.toString()
         }
         return newStreak
@@ -1004,9 +1042,9 @@ class MusicDataStore(
                 statsMap.remove(identity)
             }
 
-            // Limpieza LRU: Mantener solo las últimas 30 canciones con racha activa
-            if (statsMap.size > 30) {
-                val keysToRemove = statsMap.keys.take(statsMap.size - 30)
+            // Limpieza LRU: Mantener solo las últimas 200 canciones con racha activa
+            if (statsMap.size > 200) {
+                val keysToRemove = statsMap.keys.take(statsMap.size - 200)
                 keysToRemove.forEach { statsMap.remove(it) }
             }
 
@@ -1027,6 +1065,49 @@ class MusicDataStore(
      * Actualiza la analítica de fidelidad del artista.
      * Basado en Días Distintos escuchados.
      */
+    /**
+     * Fuente única de verdad para "Bendecida". Identifica la canción solo por
+     * título+artista (igual que la racha de saltos y de repetición) — nunca por
+     * trackKey, que incluye duración y puede variar levemente entre reproducciones
+     * de la misma canción.
+     *
+     * Devuelve si la canción YA estaba bendecida ANTES de esta escucha (para decidir
+     * si perdonar un salto de hoy). Luego actualiza la caja: si esta escucha NO fue un
+     * salto (usa el veredicto crudo, sin perdón — igual que la racha de repetición),
+     * renueva o crea la bendición. Un salto perdonado hoy no renueva la bendición por
+     * sí mismo — eso fabricaría protección sin una escucha real de por medio.
+     */
+    suspend fun updateBlessedStatus(title: String, artist: String, rawIsSkipped: Boolean): Boolean {
+        var wasBlessed = false
+        context.dataStore.edit { prefs ->
+            val statsMap = decodeBlessedSongs(prefs[BLESSED_SONGS].orEmpty()).toMutableMap()
+            val identity = "$title|$artist"
+            val today = java.time.LocalDate.now().toEpochDay()
+
+            val existing = statsMap[identity]
+            val gapDays = existing?.let { today - it.lastCompletedEpochDay }
+            wasBlessed = existing != null && (gapDays == null || gapDays <= 14)
+
+            if (!rawIsSkipped) {
+                statsMap[identity] = BlessedSong(lastCompletedEpochDay = today)
+            }
+
+            if (statsMap.size > 200) {
+                val keysToRemove = statsMap.keys.take(statsMap.size - 200)
+                keysToRemove.forEach { statsMap.remove(it) }
+            }
+
+            val newObj = JSONObject()
+            statsMap.forEach { (k, v) ->
+                val inner = JSONObject()
+                inner.put("lp", v.lastCompletedEpochDay)
+                newObj.put(k, inner)
+            }
+            prefs[BLESSED_SONGS] = newObj.toString()
+        }
+        return wasBlessed
+    }
+
     suspend fun updateArtistStats(artistName: String) {
         if (artistName.isBlank()) return
         context.dataStore.edit { prefs ->
@@ -1035,7 +1116,14 @@ class MusicDataStore(
             val today = java.time.LocalDate.now().toEpochDay()
             
             val existing = statsMap[key]
-            val updated = if (existing == null) {
+            // Conjunto Bendecida-1: `existing` nunca se reiniciaba por vencimiento — solo sumaba
+            // días para siempre, sin importar cuánto tiempo hubiera pasado desde la última vez.
+            // Esto hacía que ampliar la ventana de lectura (14→30 días, ver otros cambios) no
+            // cambiara nada de fondo: el contador de "días distintos" nunca dependía realmente
+            // del tiempo. Ahora, si pasaron más de 30 días, la racha empieza de nuevo en 1, en
+            // vez de seguir sumando sobre una fidelidad ya vieja.
+            val gapDays = existing?.let { today - it.lastPlayedEpochDay }
+            val updated = if (existing == null || (gapDays != null && gapDays > 30)) {
                 ArtistStats(distinctDaysHeard = 1, lastPlayedEpochDay = today)
             } else {
                 val isNewDay = today > existing.lastPlayedEpochDay
@@ -1047,9 +1135,9 @@ class MusicDataStore(
             
             statsMap[key] = updated
             
-            // Limpieza LRU básica (30 artistas más recientes)
-            if (statsMap.size > 30) {
-                val keysToRemove = statsMap.keys.take(statsMap.size - 30)
+            // Limpieza LRU básica (200 artistas más recientes)
+            if (statsMap.size > 200) {
+                val keysToRemove = statsMap.keys.take(statsMap.size - 200)
                 keysToRemove.forEach { statsMap.remove(it) }
             }
             
@@ -1205,7 +1293,12 @@ class MusicDataStore(
             if (json.isBlank()) 0 else {
                 runCatching {
                     val obj = JSONObject(json)
-                    obj.optInt("$title|$artist", 0)
+                    val inner = obj.optJSONObject("$title|$artist")
+                    if (inner != null) {
+                        val today = java.time.LocalDate.now().toEpochDay()
+                        val gap = today - inner.getLong("lp")
+                        if (gap <= 14) inner.getInt("c") else 0
+                    } else 0
                 }.getOrDefault(0)
             }
         }

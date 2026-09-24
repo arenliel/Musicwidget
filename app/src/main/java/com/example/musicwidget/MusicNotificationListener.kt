@@ -858,8 +858,11 @@ class MusicNotificationListener : NotificationListenerService() {
 
             InternalLogger.d(applicationContext, "[DIAG_V6] [SKIP_MATH] Track=${endSnapshot.title}, FinalPos=${finalPos}ms, Duration=${effectiveDuration}ms, Factor=$progressFactor, Verdict=$isSkipped")
 
-            val currentRAM = MusicStateProvider.current()
-            val isBlessed = currentRAM.history.any { it.trackKey == trackKey && !it.isSkipped }
+            // Conjunto Bendecida-1: reemplaza la búsqueda contra el historial en RAM (que
+            // comparaba por trackKey, incluyendo duración — inestable entre reproducciones de
+            // la misma canción) por la caja permanente y dedicada en MusicDataStore, que
+            // identifica solo por título+artista y tiene su propio vencimiento de 14 días.
+            val isBlessed = musicDataStore.updateBlessedStatus(startSnapshot.title, startSnapshot.artist, rawIsSkipped)
             if (isBlessed && isSkipped) isSkipped = false
             
             InternalLogger.d(applicationContext, "[STREAK_TRACE] Bendecida: track=$trackKey, isBlessed=$isBlessed, rawIsSkipped=$rawIsSkipped, isSkippedPostPerdon=$isSkipped")
