@@ -1315,7 +1315,7 @@ class MusicDataStore(
             val key = artist.trim().lowercase()
             val stats = statsMap[key]
             val today = java.time.LocalDate.now().toEpochDay()
-            stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 14)
+            stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 30)
         }
 
         val artistGapDebug = if (artist.isNotBlank()) {
