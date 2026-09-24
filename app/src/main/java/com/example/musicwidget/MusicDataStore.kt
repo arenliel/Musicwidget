@@ -972,6 +972,7 @@ class MusicDataStore(
             val existing = map[identity]
             val gapDays = existing?.let { today - it.second }
             val currentStreak = if (existing != null && (gapDays == null || gapDays <= 14)) existing.first else 0
+            InternalLogger.log(context, "[STREAK_TRACE] SkipStreak lectura: identity=$identity, existeAnterior=${existing != null}, gapDias=$gapDays, streakUsado=$currentStreak, expiroPorVencimiento=${existing != null && gapDays != null && gapDays > 14}")
 
             newStreak = when {
                 isSkip -> currentStreak + 1
@@ -998,6 +999,7 @@ class MusicDataStore(
                 newObj.put(k, inner)
             }
             prefs[SKIP_STREAKS] = newObj.toString()
+            InternalLogger.log(context, "[STREAK_TRACE] SkipStreak guardado: identity=$identity, newStreak=$newStreak, tamañoMapa=${map.size}")
         }
         return newStreak
     }
@@ -1057,6 +1059,7 @@ class MusicDataStore(
                 newObj.put(k, inner)
             }
             prefs[REPEAT_STATS] = newObj.toString()
+            InternalLogger.log(context, "[STREAK_TRACE] RepeatStats guardado: identity=$identity, playsToday=$finalPlaysToday, streakDays=$finalStreakDays, tamañoMapa=${statsMap.size}")
         }
         return finalPlaysToday to finalStreakDays
     }
@@ -1087,6 +1090,7 @@ class MusicDataStore(
             val existing = statsMap[identity]
             val gapDays = existing?.let { today - it.lastCompletedEpochDay }
             wasBlessed = existing != null && (gapDays == null || gapDays <= 14)
+            InternalLogger.log(context, "[STREAK_TRACE] Bendecida lectura: identity=$identity, existeAnterior=${existing != null}, gapDias=$gapDays, wasBlessed=$wasBlessed, expiroPorVencimiento=${existing != null && gapDays != null && gapDays > 14}")
 
             if (!rawIsSkipped) {
                 statsMap[identity] = BlessedSong(lastCompletedEpochDay = today)
@@ -1104,6 +1108,7 @@ class MusicDataStore(
                 newObj.put(k, inner)
             }
             prefs[BLESSED_SONGS] = newObj.toString()
+            InternalLogger.log(context, "[STREAK_TRACE] Bendecida guardado: identity=$identity, seRenovoEstaVez=${!rawIsSkipped}, tamañoMapa=${statsMap.size}")
         }
         return wasBlessed
     }
@@ -1123,6 +1128,7 @@ class MusicDataStore(
             // del tiempo. Ahora, si pasaron más de 30 días, la racha empieza de nuevo en 1, en
             // vez de seguir sumando sobre una fidelidad ya vieja.
             val gapDays = existing?.let { today - it.lastPlayedEpochDay }
+            InternalLogger.log(context, "[STREAK_TRACE] ArtistStats lectura: artist=$key, existeAnterior=${existing != null}, gapDias=$gapDays, reinicioPorVencimiento=${existing != null && gapDays != null && gapDays > 30}")
             val updated = if (existing == null || (gapDays != null && gapDays > 30)) {
                 ArtistStats(distinctDaysHeard = 1, lastPlayedEpochDay = today)
             } else {
@@ -1149,6 +1155,7 @@ class MusicDataStore(
                 newObj.put(k, inner)
             }
             prefs[ARTIST_STATS] = newObj.toString()
+            InternalLogger.log(context, "[STREAK_TRACE] ArtistStats guardado: artist=$key, distinctDaysHeard=${updated.distinctDaysHeard}, lastPlayedEpochDay=${updated.lastPlayedEpochDay}, tamañoMapa=${statsMap.size}")
         }
     }
 
@@ -1311,7 +1318,10 @@ class MusicDataStore(
             stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 14)
         }
 
-        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=$playsToday, skipStreak=$skipStreak, isFrequent=$isFrequent")
+        val artistGapDebug = if (artist.isNotBlank()) {
+            decodeArtistStats(prefs[ARTIST_STATS].orEmpty())[artist.trim().lowercase()]?.let { java.time.LocalDate.now().toEpochDay() - it.lastPlayedEpochDay }
+        } else null
+        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=$playsToday, skipStreak=$skipStreak, isFrequent=$isFrequent, artistGapDias=$artistGapDebug")
 
         return Triple(playsToday, skipStreak, isFrequent)
     }
