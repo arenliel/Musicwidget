@@ -236,6 +236,7 @@ class MusicNotificationListener : NotificationListenerService() {
     // "tengo letra cargada" sin decir de qué canción era).
     private var currentLyricsIdentity: String? = null
     private var lyricsUpdateJob: Job? = null
+    private val lyricsLock = Any()
     private var lyricsFetchJob: Job? = null
     private var unlockPollingJob: Job? = null
 
@@ -2817,16 +2818,19 @@ class MusicNotificationListener : NotificationListenerService() {
     private fun relaunchLyricsTicker(reason: String) {
         InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] relaunchLyricsTicker invocado: reason=$reason, currentLyricsEsNull=${currentLyrics == null}")
         if (!isWidgetPotentiallyVisible()) {
-            lyricsUpdateJob?.cancel()
+            synchronized(lyricsLock) {
+                lyricsUpdateJob?.cancel()
+            }
             return
         }
         val currentInfo = MusicStateProvider.current()
         if (currentInfo.isEmpty || !currentInfo.isSessionActive) {
-            lyricsUpdateJob?.cancel()
+            synchronized(lyricsLock) {
+                lyricsUpdateJob?.cancel()
+            }
             return
         }
         InternalLogger.d(applicationContext, "[LYRICS_TRACE] relaunchLyricsTicker: Reason=$reason | Track=${currentInfo.title}")
-        lyricsUpdateJob?.cancel()
 
         val activeSession = currentLogicalSession ?: return
 
@@ -2839,26 +2843,29 @@ class MusicNotificationListener : NotificationListenerService() {
         val canReuse = cachedLyrics != null && currentLyricsIdentity == targetIdentity
         InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Decisión de datos: reused=$canReuse, targetIdentity=$targetIdentity, cachedIdentity=$currentLyricsIdentity")
 
-        lyricsUpdateJob = activeSession.lyricsScope.launch {
-            val lyricsRes = if (canReuse && cachedLyrics != null) {
-                // Ya tenemos la letra correcta para esta identidad exacta: nos ahorramos el
-                // viaje a disco/red. Esto es lo que vuelve inofensivo que varios disparadores
-                // (Stage 1, sincronización pasiva, screen_wake, seek_event) llamen a esta
-                // función casi al mismo tiempo para el mismo evento — todos convergen aquí sin
-                // competir por una descarga lenta que terminan cancelándose entre sí.
-                cachedLyrics
-            } else {
-                lyricsRepository.getLyrics(
-                    currentInfo.trackKey, currentInfo.artist, currentInfo.title, currentInfo.durationMs
-                )?.also {
-                    currentLyrics = it
-                    currentLyricsIdentity = targetIdentity
-                } ?: return@launch
-            }
-            if (currentInfo.isPlaying) {
-                runLyricsShowcase(targetIdentity, lyricsRes)
-            } else {
-                runPausedLyricsCycle(targetIdentity, lyricsRes)
+        synchronized(lyricsLock) {
+            lyricsUpdateJob?.cancel()
+            lyricsUpdateJob = activeSession.lyricsScope.launch {
+                val lyricsRes = if (canReuse && cachedLyrics != null) {
+                    // Ya tenemos la letra correcta para esta identidad exacta: nos ahorramos el
+                    // viaje a disco/red. Esto es lo que vuelve inofensivo que varios disparadores
+                    // (Stage 1, sincronización pasiva, screen_wake, seek_event) llamen a esta
+                    // función casi al mismo tiempo para el mismo evento — todos convergen aquí sin
+                    // competir por una descarga lenta que terminan cancelándose entre sí.
+                    cachedLyrics
+                } else {
+                    lyricsRepository.getLyrics(
+                        currentInfo.trackKey, currentInfo.artist, currentInfo.title, currentInfo.durationMs
+                    )?.also {
+                        currentLyrics = it
+                        currentLyricsIdentity = targetIdentity
+                    } ?: return@launch
+                }
+                if (currentInfo.isPlaying) {
+                    runLyricsShowcase(targetIdentity, lyricsRes)
+                } else {
+                    runPausedLyricsCycle(targetIdentity, lyricsRes)
+                }
             }
         }
     }
