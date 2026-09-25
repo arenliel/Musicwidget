@@ -189,6 +189,11 @@ class MusicNotificationListener : NotificationListenerService() {
         val frozenTrackKey: String,       // Identidad física congelada al nacer (v6.5)
         var maxPositionMs: Long,          // MARCA DE AGUA MONOTÓNICA (Bloque D)
         var isProvisional: Boolean = false, // Defensa Post-Boot (v7.0)
+        // Conjunto Letras-Atomicas-8: true en cuanto esta sesión observa un Estado=PLAYING
+        // real por primera vez. Antes de eso (OTHER/carga), el fallback "primeros 5
+        // segundos" de runPausedLyricsCycle no debe activarse — ver ese sitio para el
+        // porqué completo (caso "Paranoia").
+        var hasConfirmedPlayback: Boolean = false,
         val startedAtRealtime: Long = android.os.SystemClock.elapsedRealtime(),
         var playbackContext: PlaybackContext,
         val context: Context
@@ -2348,6 +2353,12 @@ class MusicNotificationListener : NotificationListenerService() {
             }
         }
 
+        // Conjunto Letras-Atomicas-8: se aplica sea cual sea la rama (creación o fusión)
+        // recién tomada arriba, porque `session` ya apunta a la sesión vigente aquí.
+        if (isPlaying) {
+            session?.hasConfirmedPlayback = true
+        }
+
         // ACTUALIZACIÓN DEL DIARIO LÓGICO (Cierres-3)
         lastLogicalSnapshot = rawSnapshot
         lastAppliedSnapshot = snapshot
@@ -2952,7 +2963,9 @@ class MusicNotificationListener : NotificationListenerService() {
             val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
             
             var lastEntry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= pausedPos }
-            if (lastEntry == null && pausedPos < 5000L) {
+            // Conjunto Letras-Atomicas-8: antes, esta regla también se disparaba durante
+            // Estado=OTHER (carga), mostrando la primera línea antes de que sonara audio.
+            if (lastEntry == null && pausedPos < 5000L && currentLogicalSession?.hasConfirmedPlayback == true) {
                 lastEntry = lyricsRes.allEntries.firstOrNull()
             }
 
