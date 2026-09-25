@@ -733,7 +733,12 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     info.isEmpty -> info.artist
                     info.title == context.getString(R.string.widget_empty_title) -> info.artist
                     isSnapshot && !isStatusLabelVisible -> { val time = formatRelativeTime(context, info.lastUpdateEpoch); if (time.isEmpty()) info.artist else "${info.artist} • $time" }
-                    info.isSessionActive && info.showLyrics && info.currentLyric.isNotBlank() && info.trackKey == info.lyricsTrackKey -> "“${info.currentLyric}”"
+                    // Conjunto Letras-Atomicas-1: `info.trackKey` (4 partes, incluye duración)
+                    // nunca debió compararse contra `info.lyricsTrackKey` (en realidad
+                    // sessionIdentity, 3 partes, sin duración) — casi nunca podían coincidir.
+                    // Se calcula la identidad de negocio fresca, igual que ya hace
+                    // reconcileLyric() al validar una letra entrante.
+                    info.isSessionActive && info.showLyrics && info.currentLyric.isNotBlank() && MusicDataStore.computeSessionIdentity(info.packageName, info.title, info.artist) == info.lyricsTrackKey -> "“${info.currentLyric}”"
                     else -> info.artist
                 }
                 

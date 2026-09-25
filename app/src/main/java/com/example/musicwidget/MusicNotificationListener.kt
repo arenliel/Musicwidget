@@ -194,6 +194,15 @@ class MusicNotificationListener : NotificationListenerService() {
         val context: Context
     ) {
         val sessionIdentity: String get() = "${birthSnapshot.packageName}|${identity.title}|${identity.artist}"
+
+        // Conjunto Letras-Atomicas-1: espacio de trabajo propio de esta sesión, para todo lo
+        // relacionado con letras (descarga, ticker en vivo, ciclo de pausa, escritura al widget).
+        // Nunca se comparte entre sesiones. Al cancelarse (ver los 3 puntos donde
+        // currentLogicalSession cambia de valor en processSnapshot/onListenerConnected),
+        // TODO trabajo de letras en curso para esta canción muere con ella automáticamente —
+        // ya no depende de que alguien recuerde cancelar cada pieza suelta por separado.
+        val lyricsScope: kotlinx.coroutines.CoroutineScope =
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     }
 
     private var currentLogicalSession: LogicalSession? = null
@@ -2226,6 +2235,10 @@ class MusicNotificationListener : NotificationListenerService() {
                     startedAtRealtime = session.startedAtRealtime
                 ))
                 InternalLogger.d(applicationContext, "[HIST_BOOT] CIERRE RETROACTIVO: uuid=${session.sessionUUID}")
+                // Conjunto Letras-Atomicas-1: sin este cierre explícito, el espacio de trabajo
+                // de esta sesión quedaría huérfano para siempre (nadie más guarda una referencia
+                // a él una vez que currentLogicalSession pasa a null).
+                session.lyricsScope.coroutineContext[Job]?.cancel()
                 currentLogicalSession = null
                 // Continuamos al flujo normal de creación de sesión nueva
             }
@@ -2288,6 +2301,11 @@ class MusicNotificationListener : NotificationListenerService() {
                 context = this@MusicNotificationListener
             )
             InternalLogger.d(applicationContext, "[ART_TRACE] Sesión saliente antes de reemplazo: UUID=${session?.sessionUUID}, artworkKey=${session?.playbackContext?.artworkKey}")
+            // Conjunto Letras-Atomicas-1: cerramos el espacio de trabajo de letras de la sesión
+            // SALIENTE antes de reemplazarla — cualquier descarga o ciclo de letras suyo que
+            // siguiera en curso muere aquí mismo, nunca puede alcanzar a escribir en la sesión
+            // nueva que está a punto de nacer.
+            session?.lyricsScope?.coroutineContext[Job]?.cancel()
             currentLogicalSession = newSession
             session = newSession
             identityGenerationCounter++
@@ -2551,7 +2569,11 @@ class MusicNotificationListener : NotificationListenerService() {
                 lyricsFetchJob?.cancel()
                 currentLyrics = null
                 
-                lyricsFetchJob = serviceScope.launch {
+                // Conjunto Letras-Atomicas-1: se lanza en el espacio de trabajo de la sesión
+                // recién creada (currentLogicalSession ya es la nueva en este punto de la
+                // función) — si esta canción termina antes de que la descarga responda, muere
+                // con ella, nunca puede escribir su resultado sobre la canción siguiente.
+                lyricsFetchJob = currentLogicalSession?.lyricsScope?.launch {
                     // PUNTO B: Debounce para evitar spam de API
                     delay(500L)
                     
@@ -2796,9 +2818,13 @@ class MusicNotificationListener : NotificationListenerService() {
 
         InternalLogger.d(applicationContext, "[LYRICS_TRACE] relaunchLyricsTicker: Reason=$reason | Track=${currentInfo.title}")
         lyricsUpdateJob?.cancel()
-        
+
+        // Conjunto Letras-Atomicas-1: si no hay sesión activa, no hay a qué espacio de trabajo
+        // atar este ciclo — nos detenemos aquí en vez de lanzarlo suelto en serviceScope.
+        val activeSession = currentLogicalSession ?: return
+
         // Hallazgo v3.8: Ticker Stateless (Claude). Lee identidad y estado directo de la RAM.
-        lyricsUpdateJob = serviceScope.launch(Dispatchers.IO) {
+        lyricsUpdateJob = activeSession.lyricsScope.launch {
             val lyricsRes = lyricsRepository.getLyrics(
                 currentInfo.trackKey, 
                 currentInfo.artist, 
@@ -2895,7 +2921,7 @@ class MusicNotificationListener : NotificationListenerService() {
             updateLyricInWidget(myTrackKey, text)
             
             showLyric = !showLyric
-            delay(60000L)
+            delay(150000L) // Conjunto Letras-Atomicas-1: restaurado a 2.5 min, valor original de diseño
         }
     }
 
