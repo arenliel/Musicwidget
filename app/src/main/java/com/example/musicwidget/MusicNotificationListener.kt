@@ -229,6 +229,12 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     private var currentLyrics: LyricsResult? = null
+    // Conjunto Letras-Atomicas-2: identidad de negocio (sessionIdentity, SIN duración) con la
+    // que se obtuvo `currentLyrics`. Es la única llave válida para decidir si se puede reutilizar
+    // sin volver a golpear red/disco. Nunca comparar por trackKey (incluye duración, cambia con
+    // refinamientos tardíos) ni por un simple null-check (eso fue exactamente el bug: decía
+    // "tengo letra cargada" sin decir de qué canción era).
+    private var currentLyricsIdentity: String? = null
     private var lyricsUpdateJob: Job? = null
     private var lyricsFetchJob: Job? = null
     private var unlockPollingJob: Job? = null
@@ -2568,7 +2574,8 @@ class MusicNotificationListener : NotificationListenerService() {
                 lyricsUpdateJob?.cancel()
                 lyricsFetchJob?.cancel()
                 currentLyrics = null
-                
+                currentLyricsIdentity = null
+
                 // Conjunto Letras-Atomicas-1: se lanza en el espacio de trabajo de la sesión
                 // recién creada (currentLogicalSession ya es la nueva en este punto de la
                 // función) — si esta canción termina antes de que la descarga responda, muere
@@ -2576,36 +2583,34 @@ class MusicNotificationListener : NotificationListenerService() {
                 lyricsFetchJob = currentLogicalSession?.lyricsScope?.launch {
                     // PUNTO B: Debounce para evitar spam de API
                     delay(500L)
-                    
+
                     val result = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
                     if (result != null && isActive) {
                         currentLyrics = result
+                        currentLyricsIdentity = MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist)
                         relaunchLyricsTicker("identity_change")
                     } else if (isActive) {
                         // PUNTO E: Fallback Silencioso - Si falla la API, limpiamos el widget
                         InternalLogger.d(applicationContext, "[LYRICS_TRACE] Fallback Silencioso: No se encontraron letras.")
-                        updateLyricInWidget(snapshot.trackKey, "")
+                        updateLyricInWidget(MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist), "")
                     }
                 }
-            } else if (trackChangedUI && currentLyrics != null) {
-                // La canción de negocio es la misma (solo se afinó trackKey, ej. duración tardía).
-                // Reutilizamos la letra ya cargada en vez de re-buscarla en red (Conjunto Letras-3).
-                relaunchLyricsTicker("metadata_refined")
             } else {
-                // Sincronización pasiva: Si no hay cambio de track, relanzamos solo si hay desvío o cambio de estado
+                // Conjunto Letras-Atomicas-2: eliminamos la antigua rama "trackChangedUI" — nunca
+                // pudo ejecutarse (trackChangedUI y songChangedForLyrics eran exactamente la misma
+                // fórmula, así que si songChangedForLyrics ya dio false, trackChangedUI también).
+                // La decisión de reutilizar la letra ya cargada en vez de re-buscarla ahora vive
+                // centralizada dentro de relaunchLyricsTicker (ver Cambio 3) — no repartida aquí.
+                // Cualquier evento que no sea un cambio real de canción entra a este único camino.
                 InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Entrando a sincronización pasiva: currentLyricsEsNull=${currentLyrics == null}, trackKey=${snapshot.trackKey}, durationMs=${snapshot.durationMs}")
-                if (currentLyrics == null) {
-                    currentLyrics = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
-                    InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Resultado de reintento: exito=${currentLyrics != null}, trackKey=${snapshot.trackKey}, durationMs=${snapshot.durationMs}")
-                }
 
                 val effectivePos = previousLogical?.projectedPositionMs() ?: 0L
                 val drift = Math.abs(effectivePos - snapshot.projectedPositionMs())
-                
+
                 InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Pre-shouldResync: stateChangedUI=$stateChangedUI, drift=$drift, tickerActivo=${lyricsUpdateJob?.isActive}, currentLyricsEsNull=${currentLyrics == null}")
                 val shouldResync = stateChangedUI || drift > 1500L || lyricsUpdateJob?.isActive != true
 
-                if (shouldResync && currentLyrics != null) {
+                if (shouldResync) {
                     relaunchLyricsTicker("state_sync")
                 }
             }
@@ -2809,33 +2814,45 @@ class MusicNotificationListener : NotificationListenerService() {
             lyricsUpdateJob?.cancel()
             return
         }
-
         val currentInfo = MusicStateProvider.current()
         if (currentInfo.isEmpty || !currentInfo.isSessionActive) {
             lyricsUpdateJob?.cancel()
             return
         }
-
         InternalLogger.d(applicationContext, "[LYRICS_TRACE] relaunchLyricsTicker: Reason=$reason | Track=${currentInfo.title}")
         lyricsUpdateJob?.cancel()
 
-        // Conjunto Letras-Atomicas-1: si no hay sesión activa, no hay a qué espacio de trabajo
-        // atar este ciclo — nos detenemos aquí en vez de lanzarlo suelto en serviceScope.
         val activeSession = currentLogicalSession ?: return
 
-        // Hallazgo v3.8: Ticker Stateless (Claude). Lee identidad y estado directo de la RAM.
-        lyricsUpdateJob = activeSession.lyricsScope.launch {
-            val lyricsRes = lyricsRepository.getLyrics(
-                currentInfo.trackKey, 
-                currentInfo.artist, 
-                currentInfo.title, 
-                currentInfo.durationMs
-            ) ?: return@launch
+        // Conjunto Letras-Atomicas-2: identidad de negocio de lo que suena AHORA. Es la única
+        // llave que decide si podemos reutilizar `currentLyrics` sin tocar red/disco. Capturamos
+        // ambos valores aquí (fuera de la corrutina) para no leer variables de clase que puedan
+        // cambiar mientras la corrutina está suspendida.
+        val targetIdentity = MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
+        val cachedLyrics = currentLyrics
+        val canReuse = cachedLyrics != null && currentLyricsIdentity == targetIdentity
+        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Decisión de datos: reused=$canReuse, targetIdentity=$targetIdentity, cachedIdentity=$currentLyricsIdentity")
 
-            if (currentInfo.isPlaying) {
-                runLyricsShowcase(MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist), lyricsRes)
+        lyricsUpdateJob = activeSession.lyricsScope.launch {
+            val lyricsRes = if (canReuse && cachedLyrics != null) {
+                // Ya tenemos la letra correcta para esta identidad exacta: nos ahorramos el
+                // viaje a disco/red. Esto es lo que vuelve inofensivo que varios disparadores
+                // (Stage 1, sincronización pasiva, screen_wake, seek_event) llamen a esta
+                // función casi al mismo tiempo para el mismo evento — todos convergen aquí sin
+                // competir por una descarga lenta que terminan cancelándose entre sí.
+                cachedLyrics
             } else {
-                runPausedLyricsCycle(MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist), lyricsRes)
+                lyricsRepository.getLyrics(
+                    currentInfo.trackKey, currentInfo.artist, currentInfo.title, currentInfo.durationMs
+                )?.also {
+                    currentLyrics = it
+                    currentLyricsIdentity = targetIdentity
+                } ?: return@launch
+            }
+            if (currentInfo.isPlaying) {
+                runLyricsShowcase(targetIdentity, lyricsRes)
+            } else {
+                runPausedLyricsCycle(targetIdentity, lyricsRes)
             }
         }
     }
