@@ -86,6 +86,18 @@ class LyricsRepository(private val context: Context) {
             if (connection.responseCode == 200) {
                 val response = connection.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(response)
+                // Conjunto Letras-Atomicas-5: LRCLIB es una base colaborativa y puede
+                // tener entradas mal etiquetadas — verificamos que lo que devuelve
+                // realmente corresponda al artista/título que pedimos antes de confiar
+                // en su contenido.
+                val returnedTrack = json.optString("trackName")
+                val returnedArtist = json.optString("artistName")
+                val matchesRequest = normalizeForSearch(returnedTrack).equals(normalizeForSearch(title), ignoreCase = true) &&
+                    normalizeForSearch(returnedArtist).equals(normalizeForSearch(artist), ignoreCase = true)
+                if (!matchesRequest) {
+                    Log.e("LyricsRepo", "Respuesta de LRCLIB no coincide con lo solicitado: pedido=$artist|$title, recibido=$returnedArtist|$returnedTrack")
+                    return@withContext null
+                }
                 return@withContext json.optString("syncedLyrics").takeIf { it.isNotBlank() }
             }
         } catch (e: Exception) {
