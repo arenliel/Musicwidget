@@ -49,7 +49,7 @@ Se confirma la **ausencia de escrituras redundantes** para una misma carátula t
 - Esto confirma que `confirmedArtworkKey` en `PlaybackContext` está filtrando correctamente las ráfagas.
 
 ## Punto 4 — Candados de duplicados
-Se detectaron **24 bloqueos** por `contentKey` duplicado (`[DIAG_V7_KEY]`). El sistema continúa deduplicando ráfagas de posición de forma efectiva.
+Se detectaron **33 bloqueos** por `contentKey` duplicado (`[DIAG_V7_KEY]`). El sistema continúa deduplicando ráfagas de posición de forma efectiva.
 
 ---
 **Archivo guardado como:** `docs/reportes-ia/analisis_logs_artworks_8c48dd7.md`
