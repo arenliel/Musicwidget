@@ -2947,7 +2947,9 @@ class MusicNotificationListener : NotificationListenerService() {
     private fun updateLyricInWidget(trackKey: String, lyric: String) {
         // Relevo Atómico (v4.0)
         serviceScope.launch {
-            if (MusicStateProvider.applyEvent(MusicUpdateEvent.LyricTick(lyric, trackKey))) {
+            val applied = MusicStateProvider.applyEvent(MusicUpdateEvent.LyricTick(lyric, trackKey))
+            InternalLogger.d(applicationContext, "[LYRICS_WIDGET_WRITE] trackKey=$trackKey, lyric=\"$lyric\", applied=$applied")
+            if (applied) {
                 uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
             }
         }
