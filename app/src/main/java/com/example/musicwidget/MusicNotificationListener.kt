@@ -2916,6 +2916,15 @@ class MusicNotificationListener : NotificationListenerService() {
                     updateLyricInWidget(myTrackKey, "")
                 }
                 break
+            } else if (lyricsRes.allEntries.isNotEmpty()) {
+                // Todavía no llega ninguna línea (intro largo, currentPos está antes de la
+                // primera marca de tiempo). En vez de rendirse, programamos la espera exacta
+                // hasta que llegue, en trozos del mismo umbral de silencio ya establecido, para
+                // seguir revisando la identidad de la sesión mientras tanto (Conjunto
+                // Letras-Atomicas-4).
+                val firstEntry = lyricsRes.allEntries.first()
+                val waitTime = (firstEntry.timestampMs - (currentPos + snappinessOffset)).coerceAtLeast(100L)
+                delay(waitTime.coerceAtMost(LYRICS_SILENCE_THRESHOLD_MS))
             } else {
                 break
             }
