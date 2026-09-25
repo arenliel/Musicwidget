@@ -66,15 +66,17 @@ object MusicStateProvider {
 
         val shouldResetClock = sessionChanged || e.info.isPlaying
 
-        // Identidad de negocio (sessionIdentity, no trackKey) para decidir si la letra actual
-        // sigue perteneciendo a la misma canción. Evita descartar una letra válida solo porque
-        // trackKey cambió por una corrección tardía de duración (Conjunto Letras-2).
-        val lyricBelongsToSameSong = MusicDataStore.computeSessionIdentity(current.packageName, current.title, current.artist) ==
-            MusicDataStore.computeSessionIdentity(e.info.packageName, e.info.title, e.info.artist)
+        // sessionChanged ya es la comparación de sessionIdentity — lyricBelongsToSameSong es
+        // su negación, no un cálculo nuevo (Conjunto Letras-Atomicas-3, elimina duplicado).
+        val lyricBelongsToSameSong = !sessionChanged
 
         return e.info.copy(
             currentLyric = if (lyricBelongsToSameSong) current.currentLyric else "",
-            lyricsTrackKey = if (lyricBelongsToSameSong) e.info.trackKey else "",
+            // lyricsTrackKey debe preservarse desde `current` (ya etiquetado correctamente como
+            // sessionIdentity por reconcileLyric), nunca recalcularse desde e.info.trackKey
+            // (incluye duración — formato incompatible con la comparación de TextInfo) (Conjunto
+            // Letras-Atomicas-3).
+            lyricsTrackKey = if (lyricBelongsToSameSong) current.lyricsTrackKey else "",
             history = stableHistory,
             lastUpdateEpoch = if (shouldResetClock) System.currentTimeMillis() else current.lastUpdateEpoch,
             observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime
@@ -83,18 +85,15 @@ object MusicStateProvider {
 
     private fun reconcileRefinement(current: MusicInfo, e: MusicUpdateEvent.MetadataRefinement): MusicInfo {
         // Este evento nunca representa un cambio real de canción — es la misma pista con datos
-        // afinados (ej. duración exacta llegando tarde). Si ya había una letra resuelta y
-        // etiquetada, se re-etiqueta con el trackKey nuevo para que no quede huérfana
-        // (Conjunto Letras-2).
-        val updatedLyricsTrackKey = if (current.lyricsTrackKey.isNotBlank()) e.newTrackKey else current.lyricsTrackKey
-
+        // afinados (ej. duración exacta llegando tarde). sessionIdentity no depende de la duración,
+        // así que lyricsTrackKey no necesita (ni debe) recalcularse aquí: se preserva intacto vía
+        // .copy() al no mencionarse explícitamente (Conjunto Letras-Atomicas-3).
         return current.copy(
             trackKey = e.newTrackKey,
             artworkKey = e.newArtworkKey,
             durationMs = e.newDuration,
             isPlaying = e.isPlaying,
-            isBuffering = false,
-            lyricsTrackKey = updatedLyricsTrackKey
+            isBuffering = false
         )
     }
 

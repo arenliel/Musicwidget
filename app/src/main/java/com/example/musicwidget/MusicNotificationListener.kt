@@ -2716,7 +2716,9 @@ class MusicNotificationListener : NotificationListenerService() {
                             MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
                     
                     val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
-                    val finalLyricKey = if (canKeepLyric) snapshot.trackKey else ""
+                    // Preservar currentInfo.lyricsTrackKey (ya en formato sessionIdentity), nunca
+                    // snapshot.trackKey (incluye duración) (Conjunto Letras-Atomicas-3).
+                    val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
 
                     val (playsToday, skipStreak, isFrequent) = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
 
