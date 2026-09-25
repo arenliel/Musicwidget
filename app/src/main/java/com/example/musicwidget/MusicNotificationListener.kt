@@ -2872,6 +2872,7 @@ class MusicNotificationListener : NotificationListenerService() {
                         currentLyricsIdentity = targetIdentity
                     } ?: return@launch
                 }
+                InternalLogger.d(applicationContext, "[TICKER_DEBUG] reason=$reason, targetIdentity=$targetIdentity, canReuse=$canReuse, currentInfo.isPlaying=${currentInfo.isPlaying}")
                 if (currentInfo.isPlaying) {
                     runLyricsShowcase(targetIdentity, lyricsRes)
                 } else {
@@ -2901,6 +2902,7 @@ class MusicNotificationListener : NotificationListenerService() {
             val currentPos = snapshot.projectedPositionMs()
             
             val entry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= (currentPos + snappinessOffset) }
+            InternalLogger.d(applicationContext, "[SHOWCASE_DEBUG] myTrackKey=$myTrackKey, currentPos=$currentPos, positionMs=${snapshot.positionMs}, positionUpdatedAtRealtime=${snapshot.positionUpdatedAtRealtime}, playbackState=${snapshot.playbackState}, entryTs=${entry?.timestampMs}, firstEntryTs=${lyricsRes.allEntries.firstOrNull()?.timestampMs}")
             
             if (entry != null) {
                 updateLyricInWidget(myTrackKey, entry.text)
@@ -2963,11 +2965,13 @@ class MusicNotificationListener : NotificationListenerService() {
             val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
             
             var lastEntry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= pausedPos }
+            val fallbackFired = lastEntry == null && pausedPos < 5000L && currentLogicalSession?.hasConfirmedPlayback == true
             // Conjunto Letras-Atomicas-8: antes, esta regla también se disparaba durante
             // Estado=OTHER (carga), mostrando la primera línea antes de que sonara audio.
-            if (lastEntry == null && pausedPos < 5000L && currentLogicalSession?.hasConfirmedPlayback == true) {
+            if (fallbackFired) {
                 lastEntry = lyricsRes.allEntries.firstOrNull()
             }
+            InternalLogger.d(applicationContext, "[PAUSEDCYCLE_DEBUG] myTrackKey=$myTrackKey, pausedPos=$pausedPos, fallbackFired=$fallbackFired, hasConfirmedPlayback=${currentLogicalSession?.hasConfirmedPlayback}, lastEntryTs=${lastEntry?.timestampMs}")
 
             val text = if (showLyric && lastEntry != null) lastEntry.text else ""
             updateLyricInWidget(myTrackKey, text)
