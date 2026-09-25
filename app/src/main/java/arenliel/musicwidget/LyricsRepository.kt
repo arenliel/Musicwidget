@@ -51,16 +51,22 @@ class LyricsRepository(private val context: Context) {
             )
             return@withContext parseLrc(trackKey, networkResult, durationMs)
         } else {
-            lyricsDao.insertLyrics(
-                LyricsEntity(
-                    trackKey = trackKey,
-                    syncedLyrics = null,
-                    plainLyrics = null,
-                    timestampFetched = now,
-                    lastAccessed = now,
-                    notFound = true
+            // Conjunto Letras-Atomicas-9: sin duración confirmada, un "no encontrado"
+            // de LRCLIB no es confiable (catálogo con casi-duplicados por duración).
+            if (durationMs > 0) {
+                lyricsDao.insertLyrics(
+                    LyricsEntity(
+                        trackKey = trackKey,
+                        syncedLyrics = null,
+                        plainLyrics = null,
+                        timestampFetched = now,
+                        lastAccessed = now,
+                        notFound = true
+                    )
                 )
-            )
+            } else {
+                android.util.Log.d("LYRICS_RETRY_TRACE", "Fallo sin duración confirmada (durationMs=$durationMs): no se cachea notFound, trackKey=$trackKey")
+            }
             return@withContext null
         }
     }
