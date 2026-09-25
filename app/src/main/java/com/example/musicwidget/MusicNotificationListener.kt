@@ -2584,15 +2584,19 @@ class MusicNotificationListener : NotificationListenerService() {
                     // PUNTO B: Debounce para evitar spam de API
                     delay(500L)
 
-                    val result = lyricsRepository.getLyrics(snapshot.trackKey, snapshot.artist, snapshot.title, snapshot.durationMs)
+                    // Conjunto Letras-Atomicas-5: releemos el estado real justo antes de
+                    // consultar, en vez de usar el snapshot capturado antes del debounce —
+                    // la duración pudo resolverse recién durante esta espera.
+                    val freshInfo = MusicStateProvider.current()
+                    val result = lyricsRepository.getLyrics(freshInfo.trackKey, freshInfo.artist, freshInfo.title, freshInfo.durationMs)
                     if (result != null && isActive) {
                         currentLyrics = result
-                        currentLyricsIdentity = MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist)
+                        currentLyricsIdentity = MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist)
                         relaunchLyricsTicker("identity_change")
                     } else if (isActive) {
                         // PUNTO E: Fallback Silencioso - Si falla la API, limpiamos el widget
                         InternalLogger.d(applicationContext, "[LYRICS_TRACE] Fallback Silencioso: No se encontraron letras.")
-                        updateLyricInWidget(MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist), "")
+                        updateLyricInWidget(MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist), "")
                     }
                 }
             } else {
