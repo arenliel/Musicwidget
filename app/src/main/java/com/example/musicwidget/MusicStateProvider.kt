@@ -64,7 +64,7 @@ object MusicStateProvider {
             e.info.history
         }
 
-        val shouldResetClock = sessionChanged || e.info.isPlaying
+        val shouldResetClock = !e.isRehydration && (sessionChanged || e.info.isPlaying)
 
         // sessionChanged ya es la comparación de sessionIdentity — lyricBelongsToSameSong es
         // su negación, no un cálculo nuevo (Conjunto Letras-Atomicas-3, elimina duplicado).
@@ -149,7 +149,10 @@ object MusicStateProvider {
 }
 
 sealed class MusicUpdateEvent {
-    data class NewSession(val info: MusicInfo) : MusicUpdateEvent()
+    // Conjunto Identidad-Rehidratacion-1: isRehydration distingue un NewSession que reconstruye
+    // el estado desde disco al arrancar (nunca debe resetear el reloj relativo, ver
+    // reconcileNewSession) de uno que representa una canción nueva de verdad, detectada en vivo.
+    data class NewSession(val info: MusicInfo, val isRehydration: Boolean = false) : MusicUpdateEvent()
     data class MetadataRefinement(val newTrackKey: String, val newArtworkKey: String, val newDuration: Long, val isPlaying: Boolean) : MusicUpdateEvent()
     data class ArtworkResolved(val trackKey: String, val artworkKey: String, val iconKey: String? = null) : MusicUpdateEvent()
     data class LyricTick(val lyric: String, val trackKey: String) : MusicUpdateEvent()

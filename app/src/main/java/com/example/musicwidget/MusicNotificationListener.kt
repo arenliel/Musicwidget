@@ -585,7 +585,14 @@ class MusicNotificationListener : NotificationListenerService() {
                     artist = info.artist,
                     album = info.album,
                     mediaId = "",
-                    artworkUri = info.artworkUri,
+                    // Conjunto Identidad-Rehidratacion-1: se usa info.artworkKey (la clave cruda de
+                    // deduplicación que el propio código ya preserva correctamente) en vez de
+                    // info.artworkUri (que, una vez resuelta la portada, es la ruta LOCAL del
+                    // archivo cacheado). MediaSnapshot.artworkKey se calcula a partir de este campo
+                    // — si aquí queda una ruta local, nunca podrá coincidir con la URL remota cruda
+                    // que trae un snapshot en vivo para la misma canción sin cambiar, y
+                    // artworkChangedUI da un falso "cambió" en cada reinicio de servicio.
+                    artworkUri = info.artworkKey,
                     playbackState = if (info.isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
                     isSessionActive = info.isSessionActive,
                     playbackDeviceName = info.playbackDeviceName,
@@ -1246,7 +1253,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
                 // INIT RAM (v2.8): Sincronizamos la memoria con el disco al arrancar
                 serviceScope.launch {
-                    MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo))
+                    MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo, isRehydration = true))
                 }
                 
                 InternalLogger.d(applicationContext, "[DIAGNOSTIC] Punteros de estado y RAM rehidratados desde DataStore.")
