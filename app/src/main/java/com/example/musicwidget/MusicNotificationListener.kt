@@ -1953,43 +1953,6 @@ class MusicNotificationListener : NotificationListenerService() {
         return "Altavoz del teléfono" to AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
     }
 
-    private fun isAppAllowed(packageName: String): Boolean {
-        // 0. Apps prohibidas explícitamente (Blacklist interna)
-        val restrictedPackages = setOf(
-            "org.kde.kdeconnect", "com.google.android.projection.gearhead", 
-            "com.android.systemui", "com.google.android.apps.maps"
-        )
-        if (restrictedPackages.contains(packageName)) return false
-
-        // 1. Apps conocidas que siempre permitimos (Fallback robusto)
-        val commonMusicPackages = setOf(
-            "com.spotify.music", "com.google.android.apps.youtube.music",
-            "com.apple.android.music", "com.amazon.mp3", "com.soundcloud.android",
-            "org.videolan.vlc", "com.mxtech.videoplayer.ad", "com.deezer.android",
-            "com.tidal.android", "com.pandora.android", "com.musicolet", "com.hiby.music"
-        )
-        if (commonMusicPackages.contains(packageName)) return true
-
-        return try {
-            val pm = packageManager
-            val appInfo = pm.getApplicationInfo(packageName, 0)
-            
-            // 2. Por categoría de sistema (Android 8.0+)
-            val isMediaCategory = appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_AUDIO ||
-                    appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_VIDEO
-            if (isMediaCategory) return true
-
-            // 3. Por servicios multimedia declarados
-            val mediaIntent = android.content.Intent("android.media.browse.MediaBrowserService")
-            val mediaApps = pm.queryIntentServices(mediaIntent, 0).map { it.serviceInfo.packageName }
-            if (mediaApps.contains(packageName)) return true
-
-            false
-        } catch (e: Exception) {
-            false
-        }
-    }
-
     private fun sanitize(text: String): String = text.trim().lowercase()
 
     private suspend fun processSnapshot(
@@ -2001,6 +1964,14 @@ class MusicNotificationListener : NotificationListenerService() {
         // v8.0: Bloqueo proactivo hasta que la rehidratación termine (BLOQUE A)
         kotlinx.coroutines.withTimeoutOrNull(BOOT_GATE_TIMEOUT_MS) { bootGate.await() }
             ?: InternalLogger.w(applicationContext, "[HIST_BOOT] BOOT_GATE_TIMEOUT: procesando paquete vivo ($reason) sin estado rehidratado")
+
+        // FILTRO DE IDENTIDAD (Conjunto Deteccion-Nativa-Apps-1): se evalúa aquí, al principio
+        // absoluto de la función, antes de CUALQUIER mutación de estado (RAM, disco, eventos),
+        // para que una app no seleccionada por el usuario quede completamente ignorada — ni
+        // purga la caché de artwork, ni limpia el ícono en disco, ni dispara SessionEnded.
+        if (!PermissionUtils.isNativeMusicApp(applicationContext, rawSnapshot.packageName)) return
+        val currentBlacklist = musicDataStore.musicInfoFlow.first().blacklist
+        if (currentBlacklist.contains(rawSnapshot.packageName)) return
 
         // NOTE (Conjunto Artwork-Stabilization Fase 3): must remain `var`, not `val`. This local
         // reference is intentionally reassigned to `newSession` right after a session replacement
@@ -2143,12 +2114,6 @@ class MusicNotificationListener : NotificationListenerService() {
                 return
             }
         }
-
-        // FILTRO DE IDENTIDAD (Allow-list)
-        if (!isAppAllowed(rawSnapshot.packageName)) return
-
-        val currentBlacklist = musicDataStore.musicInfoFlow.first().blacklist
-        if (currentBlacklist.contains(rawSnapshot.packageName)) return
 
         val isSameSession = session?.sessionIdentity == rawSnapshot.sessionIdentity
         

@@ -114,54 +114,87 @@ object PermissionUtils {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !isNotificationServiceEnabled(context)
     }
 
+    // Conjunto Deteccion-Nativa-Apps-1: caches a nivel de proceso. No requieren invalidación —
+    // una app nueva simplemente se evalúa correctamente la primera vez que se le consulta, y el
+    // resultado se memoiza para siempre mientras el proceso siga vivo.
+    @Volatile private var browserPackagesCache: Set<String>? = null
+    @Volatile private var mediaBrowserServicePackagesCache: Set<String>? = null
+    private val musicAppDetectionCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    private fun browserPackages(context: Context): Set<String> {
+        browserPackagesCache?.let { return it }
+        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("http://")).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+        val result = context.packageManager.queryIntentActivities(browserIntent, 0)
+            .map { it.activityInfo.packageName }
+            .toSet()
+        browserPackagesCache = result
+        return result
+    }
+
+    private fun mediaBrowserServicePackages(context: Context): Set<String> {
+        mediaBrowserServicePackagesCache?.let { return it }
+        val mediaIntent = Intent("android.media.browse.MediaBrowserService")
+        val result = context.packageManager.queryIntentServices(mediaIntent, 0)
+            .map { it.serviceInfo.packageName }
+            .toSet()
+        mediaBrowserServicePackagesCache = result
+        return result
+    }
+
     /**
-     * Obtiene la lista de aplicaciones de música instaladas de forma eficiente.
+     * Detección nativa de apps de música/audio (Conjunto Deteccion-Nativa-Apps-1).
+     * Sin listas de paquetes hardcodeadas: un paquete se considera app de música si
+     * expone un MediaBrowserService o está categorizado por el sistema como
+     * CATEGORY_AUDIO/CATEGORY_VIDEO, y NO responde como navegador web (mismo criterio
+     * que usa Android internamente para resolver el navegador predeterminado).
+     */
+    fun isNativeMusicApp(context: Context, packageName: String): Boolean {
+        musicAppDetectionCache[packageName]?.let { return it }
+
+        val result = runCatching {
+            if (browserPackages(context).contains(packageName)) {
+                false
+            } else {
+                val appInfo = context.packageManager.getApplicationInfo(packageName, 0)
+                val isMediaCategory = appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_AUDIO ||
+                        appInfo.category == android.content.pm.ApplicationInfo.CATEGORY_VIDEO
+                isMediaCategory || mediaBrowserServicePackages(context).contains(packageName)
+            }
+        }.getOrDefault(false)
+
+        musicAppDetectionCache[packageName] = result
+        return result
+    }
+
+    /**
+     * Obtiene la lista de aplicaciones de música instaladas, mediante detección nativa
+     * (sin listas de paquetes hardcodeadas): enumera las apps con actividad de LAUNCHER
+     * (ya declarado en <queries>) y las filtra con [isNativeMusicApp].
      */
     fun getInstalledMusicApps(context: Context): List<AppItem> {
         val pm = context.packageManager
-        val mediaIntent = Intent("android.media.browse.MediaBrowserService")
-        val mediaServices = pm.queryIntentServices(mediaIntent, 0)
-        
-        val commonMusicPackages = setOf(
-            "com.spotify.music", 
-            "com.google.android.apps.youtube.music", 
-            "com.apple.android.music", 
-            "com.amazon.mp3", 
-            "com.soundcloud.android", 
-            "org.videolan.vlc", 
-            "com.mxtech.videoplayer.ad", 
-            "com.deezer.android", 
-            "com.tidal.android", 
-            "com.pandora.android"
-        )
+        val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val launcherPackages = pm.queryIntentActivities(launcherIntent, 0)
+            .map { it.activityInfo.packageName }
+            .toSet()
 
-        val musicApps = mediaServices.mapNotNull { resolveInfo ->
-            val pkg = resolveInfo.serviceInfo.packageName
-            runCatching {
-                val appInfo = pm.getApplicationInfo(pkg, 0)
-                AppItem(
-                    name = pm.getApplicationLabel(appInfo).toString(),
-                    packageName = pkg,
-                    icon = pm.getApplicationIcon(appInfo),
-                    isEnabled = appInfo.enabled
-                )
-            }.getOrNull()
-        }.toMutableList()
-
-        commonMusicPackages.forEach { pkg ->
-            if (musicApps.none { it.packageName == pkg }) {
+        return launcherPackages
+            .filter { isNativeMusicApp(context, it) }
+            .mapNotNull { pkg ->
                 runCatching {
                     val appInfo = pm.getApplicationInfo(pkg, 0)
-                    musicApps.add(AppItem(
+                    AppItem(
                         name = pm.getApplicationLabel(appInfo).toString(),
                         packageName = pkg,
                         icon = pm.getApplicationIcon(appInfo),
                         isEnabled = appInfo.enabled
-                    ))
-                }
+                    )
+                }.getOrNull()
             }
-        }
-
-        return musicApps.distinctBy { it.packageName }.sortedBy { it.name }
+            .sortedBy { it.name }
     }
 }
