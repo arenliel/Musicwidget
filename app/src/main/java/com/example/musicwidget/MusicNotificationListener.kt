@@ -2383,64 +2383,68 @@ class MusicNotificationListener : NotificationListenerService() {
         val isSessionEnded = sessionEnded
         val isTrackContentChanged = trackContentChanged
 
-        // FAST-TRACK SSOT (v4.0 - Relevo Atómico de RAM)
-        serviceScope.launch {
-            mutationMutex.withLock {
-                val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
-                val currentInfo = musicDataStore.musicInfoFlow.first()
-                
-                // Hallazgo v3.7: Inmunidad de Salida.
-                val (plays, skip, freq) = when {
-                    isSessionEnded -> Triple(0, 0, false)
-                    !isPlaying -> Triple(currentMem.playsToday, currentMem.skipStreak, currentMem.isFrequentArtist)
-                    else -> musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
-                }
-                
-                val memInfo = MusicInfo(
-                    title = snapshot.title,
-                    artist = snapshot.artist,
-                    packageName = snapshot.packageName,
-                    album = snapshot.album ?: "",
-                    trackKey = session?.frozenTrackKey ?: snapshot.trackKey, // Usar identidad física congelada (v6.5)
-                    artworkKey = currentInfo.artworkKey,
-                    artworkUri = snapshot.artworkUri ?: currentInfo.artworkUri,
-                    appIconKey = currentInfo.appIconKey,
-                    isPlaying = isPlaying,
-                    isSessionActive = snapshot.isSessionActive,
-                    currentLyric = if (!isSessionEnded) currentMem.currentLyric else "",
-                    lyricsTrackKey = if (!isSessionEnded) currentMem.lyricsTrackKey else "",
-                    playbackDeviceName = snapshot.playbackDeviceName,
-                    playbackDeviceType = snapshot.playbackDeviceType,
-                    durationMs = snapshot.durationMs,
-                    history = currentInfo.history,
-                    playsToday = plays,
-                    skipStreak = skip,
-                    isFrequentArtist = freq,
-                    lastUpdateEpoch = currentMem.lastUpdateEpoch,
-                    observedAtRealtime = currentMem.observedAtRealtime,
-                    sessionUUID = session?.sessionUUID ?: "",
-                    isPendingCommit = false,
-                    lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs
-                )
-                
-                val event = if (isSessionEnded) {
-                    MusicUpdateEvent.NewSession(memInfo)
-                } else if (isTrackContentChanged) {
-                    MusicUpdateEvent.MetadataRefinement(snapshot.trackKey, snapshot.artworkKey, snapshot.durationMs, isPlaying)
-                } else {
-                    MusicUpdateEvent.StatusUpdate(isPlaying, snapshot.playbackDeviceName, snapshot.playbackDeviceType, isBuffering = false)
-                }
+        // Letras-Atomicas-11: se elimina el serviceScope.launch que diferia esta actualización.
+        // processSnapshot ya es suspend; diferir esto a una corrutina aparte abría una ventana
+        // entre la escritura síncrona de hasConfirmedPlayback/lastLogicalSnapshot (arriba) y la
+        // actualización de la verdad oficial (MusicStateProvider) más la decisión de relanzar el
+        // ticker de letras — ventana en la que otro procesamiento concurrente podía leer un
+        // MusicStateProvider.current().isPlaying desactualizado. Ejecutarlo en línea garantiza que
+        // ambas cosas queden sincronizadas antes de que este procesamiento continúe.
+        mutationMutex.withLock {
+            val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
+            val currentInfo = musicDataStore.musicInfoFlow.first()
+            
+            // Hallazgo v3.7: Inmunidad de Salida.
+            val (plays, skip, freq) = when {
+                isSessionEnded -> Triple(0, 0, false)
+                !isPlaying -> Triple(currentMem.playsToday, currentMem.skipStreak, currentMem.isFrequentArtist)
+                else -> musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
+            }
+            
+            val memInfo = MusicInfo(
+                title = snapshot.title,
+                artist = snapshot.artist,
+                packageName = snapshot.packageName,
+                album = snapshot.album ?: "",
+                trackKey = session?.frozenTrackKey ?: snapshot.trackKey, // Usar identidad física congelada (v6.5)
+                artworkKey = currentInfo.artworkKey,
+                artworkUri = snapshot.artworkUri ?: currentInfo.artworkUri,
+                appIconKey = currentInfo.appIconKey,
+                isPlaying = isPlaying,
+                isSessionActive = snapshot.isSessionActive,
+                currentLyric = if (!isSessionEnded) currentMem.currentLyric else "",
+                lyricsTrackKey = if (!isSessionEnded) currentMem.lyricsTrackKey else "",
+                playbackDeviceName = snapshot.playbackDeviceName,
+                playbackDeviceType = snapshot.playbackDeviceType,
+                durationMs = snapshot.durationMs,
+                history = currentInfo.history,
+                playsToday = plays,
+                skipStreak = skip,
+                isFrequentArtist = freq,
+                lastUpdateEpoch = currentMem.lastUpdateEpoch,
+                observedAtRealtime = currentMem.observedAtRealtime,
+                sessionUUID = session?.sessionUUID ?: "",
+                isPendingCommit = false,
+                lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs
+            )
+            
+            val event = if (isSessionEnded) {
+                MusicUpdateEvent.NewSession(memInfo)
+            } else if (isTrackContentChanged) {
+                MusicUpdateEvent.MetadataRefinement(snapshot.trackKey, snapshot.artworkKey, snapshot.durationMs, isPlaying)
+            } else {
+                MusicUpdateEvent.StatusUpdate(isPlaying, snapshot.playbackDeviceName, snapshot.playbackDeviceType, isBuffering = false)
+            }
 
-                if (MusicStateProvider.applyEvent(event)) {
-                    uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
-                }
-                
-                if (isSessionEnded) {
-                    relaunchLyricsTicker("identity_change")
-                } else {
-                    val stateChangedUI = currentMem.isPlaying != isPlaying
-                    if (stateChangedUI) relaunchLyricsTicker("state_sync")
-                }
+            if (MusicStateProvider.applyEvent(event)) {
+                uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
+            }
+            
+            if (isSessionEnded) {
+                relaunchLyricsTicker("identity_change")
+            } else {
+                val stateChangedUI = currentMem.isPlaying != isPlaying
+                if (stateChangedUI) relaunchLyricsTicker("state_sync")
             }
         }
         // Solo guardamos de forma anticipada si el widget NO es visible (gating activo).
