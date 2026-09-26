@@ -859,7 +859,17 @@ class MusicDataStore(
                     currentPackageName != info.packageName
 
             val oldShouldResetClock = identityChanged || playbackStatusChanged
-            val shouldResetClock = sessionIdentityChangedForClock || playbackStatusChanged
+            // Conjunto Cierre-Diferido-No-Resetea-Reloj-1: un cierre DIFERIDO
+            // (isPendingCommit=true, ver "REGLA v6.7" en onSessionDestroyed) fuerza
+            // isPlaying=false E isSessionActive=false de forma incondicional, sin que el
+            // usuario haya interactuado ni la sesión haya terminado de verdad — es un estado
+            // explícitamente NO confirmado ("si no resucita tras Doze, la archivaremos
+            // tarde"). Resetear aquí el reloj visible equivale a resolver ese estado
+            // pendiente antes de tiempo. playbackStatusChanged en sí NO se toca (sigue
+            // determinando hasAnyChange normalmente, así que el flag isPendingCommit y la
+            // posición máxima se siguen persistiendo); solo se excluye de la decisión de
+            // resetear el reloj mientras el cierre siga sin confirmar.
+            val shouldResetClock = sessionIdentityChangedForClock || (playbackStatusChanged && !info.isPendingCommit)
             InternalLogger.d(context, "[IDENTITY_TRACE] Paso7_shouldResetClock: viejo=$oldShouldResetClock, nuevo=$shouldResetClock, coincide=${oldShouldResetClock == shouldResetClock}, sessionIdChanged=$sessionIdentityChangedForClock, playbackChanged=$playbackStatusChanged")
 
             if (shouldResetClock) {
