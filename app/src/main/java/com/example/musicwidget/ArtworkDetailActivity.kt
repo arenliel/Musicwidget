@@ -115,12 +115,12 @@ class ArtworkDetailActivity : ComponentActivity() {
     private suspend fun downloadHD(urlString: String): Bitmap? = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
-            val finalUrl = if (urlString.startsWith("content://com.spotify.mobile.android.mediaapi")) {
-                val hash = urlString.substringAfterLast(":").substringBefore("?")
-                "https://i.scdn.co/image/$hash"
-            } else {
-                urlString
-            }
+            // Conjunto Portada-Fuente-Unica-1: la traducción de URIs conocidas (Spotify, etc.)
+            // ahora vive únicamente en ArtworkUriResolver — ver ese archivo para el porqué.
+            // Nota: esto también corrige una divergencia silenciosa que tenía esta copia
+            // (no aplicaba Uri.decode antes de extraer el hash, a diferencia de la copia de
+            // MusicNotificationListener.kt).
+            val finalUrl = ArtworkUriResolver.resolveKnownUri(urlString)
 
             if (!finalUrl.startsWith("http")) return@withContext null
 

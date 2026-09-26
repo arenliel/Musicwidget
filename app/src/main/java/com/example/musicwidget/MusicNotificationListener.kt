@@ -3209,12 +3209,11 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     private suspend fun decodeAlbumArtUri(uriString: String): Bitmap? {
-        if (uriString.startsWith(SPOTIFY_MEDIA_API_PREFIX)) {
-            val hash = Uri.decode(uriString).substringAfterLast(":").substringBefore("?")
-            if (hash.isNotBlank()) return downloadBitmapFromUrl("$SPOTIFY_CDN_PREFIX$hash")
-        }
-        if (uriString.startsWith("http://") || uriString.startsWith("https://")) {
-            return downloadBitmapFromUrl(uriString)
+        // Conjunto Portada-Fuente-Unica-1: la traducción de URIs conocidas (Spotify, etc.)
+        // ahora vive únicamente en ArtworkUriResolver — ver ese archivo para el porqué.
+        val resolvedUri = ArtworkUriResolver.resolveKnownUri(uriString)
+        if (resolvedUri.startsWith("http://") || resolvedUri.startsWith("https://")) {
+            return downloadBitmapFromUrl(resolvedUri)
         }
         return try {
             contentResolver.openInputStream(Uri.parse(uriString))?.use { input ->
@@ -3451,8 +3450,8 @@ class MusicNotificationListener : NotificationListenerService() {
         private const val ARTWORK_CACHE_SIZE_KB = 8 * 1024
         private const val ARTWORK_TIMEOUT_MS = 7000L
         private const val ARTWORK_PROMOTION_TIMEOUT_MS = 3500L
-        private const val SPOTIFY_MEDIA_API_PREFIX = "content://com.spotify.mobile.android.mediaapi"
-        private const val SPOTIFY_CDN_PREFIX = "https://i.scdn.co/image/"
+        // Conjunto Portada-Fuente-Unica-1: SPOTIFY_MEDIA_API_PREFIX/SPOTIFY_CDN_PREFIX se
+        // movieron a ArtworkUriResolver.kt, única fuente de verdad para esta traducción.
         private const val DISK_SHIELD_FILE = "current_artwork_raw.webp"
     }
 
