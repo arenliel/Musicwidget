@@ -136,7 +136,10 @@ class MusicNotificationListener : NotificationListenerService() {
      * BÓVEDA DE ICONOS (v2.3): Persistencia volátil del mejor icono por paquete.
      * Evita el parpadeo visual al cambiar de pista en la misma aplicación.
      */
-    private val iconVault = mutableMapOf<String, Pair<Bitmap, Int>>()
+    // Conjunto Icono-Refactor-1: `iconVault` fue eliminada. Su función (evitar recalcular el
+    // ícono de una app ya vista) ahora la cumple IconRegistry de forma permanente y
+    // persistida en disco, en vez de una caché de RAM que se perdía en cada reinicio de
+    // proceso.
 
     /*
      * IDENTIDAD DE PISTA (v5.2): Clave inmutable basada puramente en contenido.
@@ -1199,6 +1202,15 @@ class MusicNotificationListener : NotificationListenerService() {
                     savedAppIconKey = iconKeyFile.readText().trim().takeIf { it.isNotEmpty() }
                 }
             }
+            // Conjunto Icono-Refactor-1: el tier viaja siempre junto a la clave, para que la
+            // confianza del ícono ya confirmado sobreviva a un reinicio de proceso igual que
+            // la propia clave ya lo hacía.
+            val iconTierFile = File(filesDir, APP_ICON_TIER_FILE)
+            if (iconTierFile.exists()) {
+                runCatching {
+                    currentIconTier = iconTierFile.readText().trim().toIntOrNull() ?: TIER_NONE
+                }
+            }
 
             InternalLogger.d(applicationContext, "[HIST_BOOT] SERVICE_ONCREATE: Iniciando rehidratación.")
             val currentInfo = musicDataStore.musicInfoFlow.first()
@@ -1302,49 +1314,14 @@ class MusicNotificationListener : NotificationListenerService() {
         val notification =
             sbn.notification
 
-        // Lógica de Ascenso de Icono dirigida por eventos
-        serviceScope.launch {
-            val lastSnapshot = lastAppliedSnapshot
-            if (lastSnapshot != null && sbn.packageName == lastSnapshot.packageName && 
-                currentIconTier < TIER_NOTIFICATION && 
-                notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)) {
-                
-                val density = applicationContext.resources.displayMetrics.density
-                val targetSizePx = (14 * density).toInt()
-                
-                val iconFromNotif = notification.smallIcon?.loadDrawable(this@MusicNotificationListener)?.toBitmap()
-                if (iconFromNotif != null) {
-                    val normalized = Bitmap.createScaledBitmap(iconFromNotif, targetSizePx, targetSizePx, true)
-                    
-                    commitMutex.withLock {
-                        // Re-verificar tier dentro del lock para evitar carreras
-                        if (currentIconTier < TIER_NOTIFICATION) {
-                            saveBitmapToFile(normalized, APP_ICON_FILE)
-                            val iconKey = "${sbn.packageName}_stable"
-                            saveTextToFile(iconKey, APP_ICON_KEY_FILE)
-                            savedAppIconKey = iconKey
-                            currentIconTier = TIER_NOTIFICATION
-                            
-                            // Actualización atómica del DataStore para reflejar el cambio en la UI
-                            val currentInfo = musicDataStore.musicInfoFlow.first()
-                            if (currentInfo.packageName == sbn.packageName) {
-                                val updated = currentInfo.copy(appIconKey = iconKey)
-                                musicDataStore.saveMusicInfo(updated)
-                                
-                                // SYNC RAM (v4.0): Relevo Atómico de Icono (Identity Guard)
-                                val changed = MusicStateProvider.applyEvent(MusicUpdateEvent.ArtworkResolved(
-                                    trackKey = currentInfo.trackKey,
-                                    artworkKey = currentInfo.artworkKey,
-                                    iconKey = iconKey
-                                ))
-                                if (changed) {
-                                    uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
-                                }
-                            }
-                            InternalLogger.d(applicationContext, "[DIAGNOSTIC] ICON_ASCENT: Icono ascendido a TIER_NOTIFICATION para ${sbn.packageName}")
-                        }
-                    }
-                }
+        // Lógica de Ascenso de Icono dirigida por eventos (Conjunto Icono-Refactor-1:
+        // delegada por completo a tryPromoteAppIcon, que decide y confirma de forma atómica).
+        val lastSnapshot = lastAppliedSnapshot
+        if (lastSnapshot != null && sbn.packageName == lastSnapshot.packageName &&
+            currentIconTier < TIER_NOTIFICATION &&
+            notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)) {
+            serviceScope.launch {
+                tryPromoteAppIcon(sbn.packageName, appChanged = false)
             }
         }
 
@@ -2098,6 +2075,7 @@ class MusicNotificationListener : NotificationListenerService() {
             currentIconTier = TIER_NONE
             // REGLA: Limpieza de Iconos (Icon Fix) ante cambios de app
             saveTextToFile("", APP_ICON_KEY_FILE)
+            saveTextToFile("", APP_ICON_TIER_FILE)
             savedAppIconKey = null
             
             // Hallazgo v3.4: Limpieza preventiva de RAM en transición
@@ -2514,9 +2492,6 @@ class MusicNotificationListener : NotificationListenerService() {
 
             // 1. Resolución de recursos visuales (Fase Cancelable).
             var resolvedArtwork: Bitmap? = null
-            var resolvedAppIconFinal: Bitmap? = null
-            var resolvedIconKey: String? = null
-            var resolvedTierFinal: Int = TIER_NONE
 
             // Hallazgo 1.1: Fail-safe Atomic Promotion (v3.1)
             // Watchdog de 3.5s para no bloquear la UI si la red es lenta.
@@ -2543,17 +2518,12 @@ class MusicNotificationListener : NotificationListenerService() {
                 InternalLogger.d(applicationContext, "[ART_TRACE] Resolución terminada: Exito=${resolvedArtwork != null}, gen_actual=$identityGenerationCounter, UUID_actual=${currentLogicalSession?.sessionUUID}, Track_actual=${currentLogicalSession?.identity?.title}")
             }
 
-            // B. Icono de app (Optimizado)
+            // B. Icono de app (Conjunto Icono-Refactor-1: delegado a tryPromoteAppIcon, que
+            // decide y confirma de forma atómica bajo commitMutex — ya no hay variables locales
+            // que transportar hasta el bloque de commit de más abajo).
             if (controller != null && metadata != null && 
                 (appChangedUI || savedAppIconKey == null || currentIconTier < TIER_NOTIFICATION)) {
-                val (icon, tier) = resolveAppIcon(snapshot.packageName)
-                
-                // Solo actualizamos si el nuevo tier es mejor o igual al actual (o es un cambio de app)
-                if (icon != null && (appChangedUI || tier > currentIconTier)) {
-                    resolvedAppIconFinal = icon
-                    resolvedIconKey = "${snapshot.packageName}_stable"
-                    resolvedTierFinal = tier
-                }
+                tryPromoteAppIcon(snapshot.packageName, appChanged = appChangedUI)
             }
 
             // 1.5 GESTIÓN DE LETRAS (Independiente de la imagen para evitar desfases en pausa)
@@ -2684,19 +2654,6 @@ class MusicNotificationListener : NotificationListenerService() {
                             saveBitmapToFile(placeholder, ALBUM_ART_FILE, applyPillTransform = true)
                             saveTextToFile("", ALBUM_ART_KEY_FILE)
                             session?.let { it.playbackContext = it.playbackContext.copy(confirmedArtworkKey = null) }
-                        }
-
-                        if (resolvedAppIconFinal != null && resolvedIconKey != null) {
-                            saveBitmapToFile(resolvedAppIconFinal, APP_ICON_FILE)
-                            saveTextToFile(resolvedIconKey, APP_ICON_KEY_FILE)
-                            savedAppIconKey = resolvedIconKey
-                            currentIconTier = resolvedTierFinal
-                        } else if (appChangedUI) {
-                            // FIX: Solo borramos la llave si la APP cambió y no tenemos nuevo icono.
-                            // Esto evita la alternancia visual (flicker) al cambiar de track en la misma app.
-                            saveTextToFile("", APP_ICON_KEY_FILE)
-                            savedAppIconKey = null
-                            currentIconTier = TIER_NONE
                         }
                     }
 
@@ -2974,16 +2931,33 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
-    private fun resolveAppIcon(packageName: String): Pair<Bitmap?, Int> {
-        val density = applicationContext.resources.displayMetrics.density
-        val targetSizePx = (14 * density).toInt()
+    /**
+     * Conjunto Icono-Refactor-1: única función responsable de decidir y confirmar el ícono
+     * de la app activa. Sustituye tanto la lógica de ascenso que antes vivía duplicada en
+     * onNotificationPosted como la resolución que antes hacía resolveAppIcon junto con el
+     * commit separado en processSnapshot.
+     *
+     * Todo el ciclo "leer el tier actual -> resolver un candidato -> decidir si es mejor ->
+     * escribir" ocurre atómicamente dentro de commitMutex: ninguna otra parte de la clase lee
+     * o escribe savedAppIconKey/currentIconTier fuera de esta función (con la única excepción
+     * del reset incondicional en processSnapshot cuando appChanged es true, que es una
+     * limpieza, no una decisión, y por lo tanto no participa de la misma carrera).
+     */
+    private suspend fun tryPromoteAppIcon(packageName: String, appChanged: Boolean) {
+        commitMutex.withLock {
+            if (appChanged) {
+                savedAppIconKey = null
+                currentIconTier = TIER_NONE
+                saveTextToFile("", APP_ICON_KEY_FILE)
+                saveTextToFile("", APP_ICON_TIER_FILE)
+            }
 
-        return try {
-            val existingInVault = iconVault[packageName]
-            
+            val density = applicationContext.resources.displayMetrics.density
+            val targetSizePx = (14 * density).toInt()
+
             val notifications = getActiveNotifications()
             val targetToken = selectedController?.sessionToken
-            
+
             // PRIORIDAD 1: Icono de la Notificación (Referencia Maestra)
             // 1.1 Match por Token
             var mediaNotif = if (targetToken != null) {
@@ -2995,8 +2969,8 @@ class MusicNotificationListener : NotificationListenerService() {
 
             // 1.2 Fallback: Match por PackageName + MediaSession Extra
             if (mediaNotif == null) {
-                mediaNotif = notifications.firstOrNull { 
-                    it.packageName == packageName && it.notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION) 
+                mediaNotif = notifications.firstOrNull {
+                    it.packageName == packageName && it.notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)
                 }
             }
 
@@ -3006,69 +2980,40 @@ class MusicNotificationListener : NotificationListenerService() {
             }
 
             val iconFromNotif = mediaNotif?.notification?.smallIcon?.loadDrawable(this)?.toBitmap()
-            if (iconFromNotif != null) {
-                val normalized = Bitmap.createScaledBitmap(iconFromNotif, targetSizePx, targetSizePx, true)
-                iconVault[packageName] = normalized to TIER_NOTIFICATION
-                return normalized to TIER_NOTIFICATION
+
+            val candidate: Pair<Bitmap, Int>? = if (iconFromNotif != null) {
+                Bitmap.createScaledBitmap(iconFromNotif, targetSizePx, targetSizePx, true) to TIER_NOTIFICATION
+            } else {
+                // PRIORIDAD 2/3: delegadas al registro permanente por paquete.
+                IconRegistry.resolveStaticIcon(applicationContext, packageName, targetSizePx)
             }
 
-            // PRIORIDAD 2: Rescate Monocromático
-            // Si ya tenemos un icono de Tier 2 en la bóveda, lo devolvemos para evitar re-procesar
-            if (existingInVault != null && existingInVault.second == TIER_MONOCHROME) {
-                return existingInVault
-            }
+            if (candidate != null && (appChanged || candidate.second > currentIconTier)) {
+                val (icon, tier) = candidate
+                val iconKey = "${packageName}_stable"
+                saveBitmapToFile(icon, APP_ICON_FILE)
+                saveTextToFile(iconKey, APP_ICON_KEY_FILE)
+                saveTextToFile(tier.toString(), APP_ICON_TIER_FILE)
+                savedAppIconKey = iconKey
+                currentIconTier = tier
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val appIcon = packageManager.getApplicationIcon(packageName)
-                if (appIcon is android.graphics.drawable.AdaptiveIconDrawable) {
-                    val monochrome = appIcon.monochrome
-                    if (monochrome != null) {
-                        val rawMonochrome = getNativeAwareMonochromeBitmap(monochrome)
-                        val normalized = ImageUtils.normalizeIcon(rawMonochrome, isColorFallback = false, targetSizePx = targetSizePx)
-                        iconVault[packageName] = normalized to TIER_MONOCHROME
-                        return normalized to TIER_MONOCHROME
+                val currentInfo = musicDataStore.musicInfoFlow.first()
+                if (currentInfo.packageName == packageName) {
+                    val updated = currentInfo.copy(appIconKey = iconKey)
+                    musicDataStore.saveMusicInfo(updated)
+
+                    val changed = MusicStateProvider.applyEvent(MusicUpdateEvent.ArtworkResolved(
+                        trackKey = currentInfo.trackKey,
+                        artworkKey = currentInfo.artworkKey,
+                        iconKey = iconKey
+                    ))
+                    if (changed) {
+                        uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
                     }
                 }
+                InternalLogger.d(applicationContext, "[DIAGNOSTIC] ICON_ASCENT: Icono confirmado en tier=$tier para $packageName")
             }
-
-            // PRIORIDAD 3: Color Fallback (Normalizado y con Sharpening)
-            if (existingInVault != null && existingInVault.second == TIER_COLOR) {
-                return existingInVault
-            }
-
-            val colorIcon = packageManager.getApplicationIcon(packageName).toBitmap()
-            val normalized = ImageUtils.normalizeIcon(colorIcon, isColorFallback = true, targetSizePx = targetSizePx)
-            iconVault[packageName] = normalized to TIER_COLOR
-            return normalized to TIER_COLOR
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error en jerarquía de resolución de icono para $packageName", e)
-            iconVault[packageName] ?: (null to TIER_NONE)
         }
-    }
-
-    /**
-     * Renderiza la capa monochrome respetando la resolución nativa para evitar pixelado.
-     */
-    private fun getNativeAwareMonochromeBitmap(drawable: android.graphics.drawable.Drawable): Bitmap {
-        val density = applicationContext.resources.displayMetrics.density
-        val standardSize = (108 * density).toInt()
-        
-        val intrinsicW = drawable.intrinsicWidth
-        val intrinsicH = drawable.intrinsicHeight
-        
-        // Si el recurso es ráster y pequeño, no forzamos el lienzo de 108dp para evitar "zoom borroso"
-        val renderSize = if (intrinsicW > 0 && intrinsicH > 0 && intrinsicW < standardSize) {
-            max(intrinsicW, intrinsicH)
-        } else {
-            standardSize
-        }
-
-        val bitmap = Bitmap.createBitmap(renderSize, renderSize, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(bitmap)
-        drawable.setBounds(0, 0, renderSize, renderSize)
-        drawable.draw(canvas)
-        return bitmap
     }
 
     private fun scaleForTransport(bitmap: Bitmap): Bitmap {
@@ -3471,7 +3416,6 @@ class MusicNotificationListener : NotificationListenerService() {
         lastAppliedSnapshot = null
         inFlightSnapshot = null
         artworkCache.evictAll()
-        iconVault.clear()
         lyricsUpdateJob?.cancel()
         lyricsFetchJob?.cancel()
         Log.d(TAG, "[DIAGNOSTIC] SERVICE_LIFECYCLE: onDestroy - Process ending")
@@ -3494,6 +3438,7 @@ class MusicNotificationListener : NotificationListenerService() {
         private const val ALBUM_ART_KEY_FILE = "album_art.key"
         private const val APP_ICON_FILE = "app_icon.webp"
         private const val APP_ICON_KEY_FILE = "app_icon.key"
+        private const val APP_ICON_TIER_FILE = "app_icon.tier"
         private const val MIN_ART_DIMENSION = 100
         private const val MAX_ART_DIMENSION = 800
         private const val BUFFERING_THRESHOLD_MS = 8000L
