@@ -35,6 +35,15 @@ class LyricsRepository(private val context: Context) {
         }
 
         // 2. Si no hay o TTL expiró, ir a red
+        // Conjunto Letras-Atomicas-12: sin duración confirmada, la consulta a LRCLIB queda
+        // ambigua entre distintas versiones/ediciones con el mismo título y artista, cada
+        // una con su propia sincronización. En vez de arriesgar una coincidencia ambigua,
+        // se pospone la consulta hasta que la duración real esté confirmada (llegará poco
+        // después vía un nuevo relanzamiento del ciclo de letras).
+        if (durationMs <= 0) {
+            android.util.Log.d("LYRICS_RETRY_TRACE", "Fetch pospuesto sin duración confirmada: trackKey=$trackKey")
+            return@withContext null
+        }
         val networkResult = fetchFromNetwork(artist, title, durationMs / 1000)
         val now = System.currentTimeMillis()
         
