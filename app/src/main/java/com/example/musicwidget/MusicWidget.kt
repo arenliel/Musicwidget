@@ -70,6 +70,8 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import java.io.File
 
 /**
@@ -168,7 +170,30 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         throwable: Throwable
     ) {
         InternalLogger.logError(context, "MusicWidget", throwable)
-        super.onCompositionError(context, glanceId, appWidgetId, throwable)
+        // Conjunto Widget-Host-Resiliencia-1: en vez de delegar de inmediato en el comportamiento
+        // por defecto de Glance (que pintaría una UI de error llamando directamente a
+        // AppWidgetManager con este mismo appWidgetId, en el mismo instante problemático, y
+        // probablemente fallaría igual), reintentamos el redibujado de este mismo widget con
+        // espera creciente. Evidencia (auditoria-widget-host-instability-ronda1.md +
+        // AppWidgetManager.java real de AOSP): el error "No app widget info" se origina cuando
+        // el propio worker interno de Glance despierta tras un periodo largo de inactividad y la
+        // conexión binder hacia AppWidgetManager (mService) todavía no está lista — una condición
+        // transitoria, no una invalidación permanente del ID. Un reintento con margen le da
+        // tiempo a esa reconexión antes de rendirnos. Se reintenta solo este glanceId (no los
+        // otros tamaños de widget) para no ampliar el radio del cambio.
+        CoroutineScope(Dispatchers.Default).launch {
+            val backoffMs = listOf(3_000L, 10_000L, 30_000L)
+            for ((intento, esperaMs) in backoffMs.withIndex()) {
+                delay(esperaMs)
+                val fallo = runCatching { this@MusicWidget.update(context, glanceId) }.isFailure
+                if (!fallo) {
+                    InternalLogger.log(context, "[WidgetRetry] Redibujado recuperado en el intento ${intento + 1} (tras ${esperaMs}ms) para appWidgetId=$appWidgetId")
+                    return@launch
+                }
+            }
+            InternalLogger.w(context, "[WidgetRetry] Los ${backoffMs.size} reintentos fallaron para appWidgetId=$appWidgetId. Delegando en el comportamiento por defecto de Glance.")
+            super@MusicWidget.onCompositionError(context, glanceId, appWidgetId, throwable)
+        }
     }
 
     @Composable
