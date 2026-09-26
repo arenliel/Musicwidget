@@ -2872,7 +2872,6 @@ class MusicNotificationListener : NotificationListenerService() {
                         currentLyricsIdentity = targetIdentity
                     } ?: return@launch
                 }
-                InternalLogger.d(applicationContext, "[TICKER_DEBUG] reason=$reason, targetIdentity=$targetIdentity, canReuse=$canReuse, currentInfo.isPlaying=${currentInfo.isPlaying}")
                 if (currentInfo.isPlaying) {
                     runLyricsShowcase(targetIdentity, lyricsRes)
                 } else {
@@ -2902,7 +2901,6 @@ class MusicNotificationListener : NotificationListenerService() {
             val currentPos = snapshot.projectedPositionMs()
             
             val entry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= (currentPos + snappinessOffset) }
-            InternalLogger.d(applicationContext, "[SHOWCASE_DEBUG] myTrackKey=$myTrackKey, currentPos=$currentPos, positionMs=${snapshot.positionMs}, positionUpdatedAtRealtime=${snapshot.positionUpdatedAtRealtime}, playbackState=${snapshot.playbackState}, entryTs=${entry?.timestampMs}, firstEntryTs=${lyricsRes.allEntries.firstOrNull()?.timestampMs}")
             
             if (entry != null) {
                 updateLyricInWidget(myTrackKey, entry.text)
@@ -2958,6 +2956,15 @@ class MusicNotificationListener : NotificationListenerService() {
     private suspend fun runPausedLyricsCycle(myTrackKey: String, lyricsRes: LyricsResult) {
         var showLyric = true
         while (currentCoroutineContext().isActive) {
+            // Conjunto Letras-Atomicas-10: espera de asentamiento antes de leer el estado.
+            // Evidencia (auditoria-log-diagnostico-showcase-ronda1.md + log crudo del
+            // 2026-09-25): el teléfono a veces envía un evento "aún no confirmado" y su
+            // corrección real con 27-75ms de diferencia. relaunchLyricsTicker puede lanzar
+            // este ciclo con una lectura de isPlaying ya obsoleta justo antes de que llegue
+            // la corrección. Esta espera le da margen a la cancelación cooperativa de
+            // Kotlin para interrumpir aquí mismo, antes de escribir nada en el widget, si
+            // la corrección (isPlaying real) llega dentro de este margen.
+            delay(300L)
             val currentRAM = MusicStateProvider.current()
             val currentSessionId = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist)
             if (currentSessionId != myTrackKey || currentRAM.isPlaying) break
@@ -2971,7 +2978,6 @@ class MusicNotificationListener : NotificationListenerService() {
             if (fallbackFired) {
                 lastEntry = lyricsRes.allEntries.firstOrNull()
             }
-            InternalLogger.d(applicationContext, "[PAUSEDCYCLE_DEBUG] myTrackKey=$myTrackKey, pausedPos=$pausedPos, fallbackFired=$fallbackFired, hasConfirmedPlayback=${currentLogicalSession?.hasConfirmedPlayback}, lastEntryTs=${lastEntry?.timestampMs}")
 
             val text = if (showLyric && lastEntry != null) lastEntry.text else ""
             updateLyricInWidget(myTrackKey, text)
