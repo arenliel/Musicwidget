@@ -272,12 +272,13 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     // PIPELINE DE FALLBACK IDEMPOTENTE (v5.2): Prioridad Imagen sobre Llave
                     if (!displayedInfo.isEmpty) {
                         withContext(Dispatchers.IO) {
-                            // Paso 1: Intentar rescatar del Buffer de Sesión (UUID Inmutable)
-                            val sessionBuffer = File(context.filesDir, "history/buffer/buf_${displayedInfo.sessionUUID}.webp")
-                            if (sessionBuffer.exists()) {
-                                value = decodeBitmap(sessionBuffer, 800, 800)
-                            } 
-                            
+                            // Conjunto Limpieza-Buffer-Huerfano-1: se elimina el Paso 1 original ("Buffer
+                            // de Sesión", history/buffer/buf_<sessionUUID>.webp) — ruta huérfana desde la
+                            // migración a escritura directa en history/art_<sessionUUID>.webp (v9.0, ver
+                            // comentario en MusicNotificationListener.kt/commitToHistory). Ningún punto del
+                            // código crea la carpeta history/buffer/, así que esa lectura nunca tuvo éxito:
+                            // siempre caía al Disk Shield de abajo, que queda como único fallback.
+
                             // Paso 2: Si falla, rescatar del Disk Shield Maestro
                             if (value == null) {
                                 val shieldFile = File(context.cacheDir, "current_artwork_raw.webp")
