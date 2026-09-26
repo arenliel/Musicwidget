@@ -2082,6 +2082,25 @@ class MusicNotificationListener : NotificationListenerService() {
             serviceScope.launch {
                 MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(0L)) // Simulamos fin de sesión
             }
+
+            // Conjunto Icono-Precalentado-1: precalentamos el registro permanente de iconos
+            // para esta app EN SEGUNDO PLANO, apenas se detecta que empezó a sonar (fuera de
+            // commitMutex, sin bloquear ninguna decisión de tier). Si esta app nunca se vio
+            // antes, la extracción completa (PackageManager + normalización + escritura a
+            // disco) ocurre aquí, con tiempo de sobra, en vez de ocurrir más tarde dentro de
+            // tryPromoteAppIcon exactamente cuando hace falta un fallback (por ejemplo, si la
+            // app crashea antes de que el ícono de notificación se confirme) — ese era el
+            // punto donde antes competía por commitMutex con el commit de portada. No cambia
+            // ninguna decisión de tier por sí mismo: solo dispara resolveStaticIcon, que ya
+            // sirve el resultado desde caché si ya estaba resuelto.
+            val warmupPackageName = rawSnapshot.packageName
+            if (warmupPackageName.isNotBlank()) {
+                serviceScope.launch {
+                    val density = applicationContext.resources.displayMetrics.density
+                    val targetSizePx = (14 * density).toInt()
+                    IconRegistry.resolveStaticIcon(applicationContext, warmupPackageName, targetSizePx)
+                }
+            }
         }
 
         // REGLA DE PROMOCIÓN DE SESIÓN (Persistent Snapshot)
