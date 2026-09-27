@@ -79,7 +79,13 @@ object MusicStateProvider {
             lyricsTrackKey = if (lyricBelongsToSameSong) current.lyricsTrackKey else "",
             history = stableHistory,
             lastUpdateEpoch = if (shouldResetClock) System.currentTimeMillis() else current.lastUpdateEpoch,
-            observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime
+            observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime,
+            // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): garantía estructural. Un NewSession
+            // que no confirma statsResolved=true nunca puede pisar estos 3 campos, sin importar
+            // qué traiga e.info — así se cierra la carrera de raíz, no solo en el emisor de hoy.
+            playsToday = if (e.statsResolved) e.info.playsToday else current.playsToday,
+            skipStreak = if (e.statsResolved) e.info.skipStreak else current.skipStreak,
+            isFrequentArtist = if (e.statsResolved) e.info.isFrequentArtist else current.isFrequentArtist
         )
     }
 
@@ -149,10 +155,11 @@ object MusicStateProvider {
 }
 
 sealed class MusicUpdateEvent {
-    // Conjunto Identidad-Rehidratacion-1: isRehydration distingue un NewSession que reconstruye
-    // el estado desde disco al arrancar (nunca debe resetear el reloj relativo, ver
-    // reconcileNewSession) de uno que representa una canción nueva de verdad, detectada en vivo.
-    data class NewSession(val info: MusicInfo, val isRehydration: Boolean = false) : MusicUpdateEvent()
+    // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): mismo espíritu que isRehydration — evita que
+    // cada emisor de NewSession tenga que "acordarse" de no pisar playsToday/skipStreak/
+    // isFrequentArtist con un valor todavía no confirmado. Solo el emisor que ya calculó el valor
+    // real y final (ver commitMutex en MusicNotificationListener.kt) marca statsResolved = true.
+    data class NewSession(val info: MusicInfo, val isRehydration: Boolean = false, val statsResolved: Boolean = false) : MusicUpdateEvent()
     data class MetadataRefinement(val newTrackKey: String, val newArtworkKey: String, val newDuration: Long, val isPlaying: Boolean) : MusicUpdateEvent()
     data class ArtworkResolved(val trackKey: String, val artworkKey: String, val iconKey: String? = null) : MusicUpdateEvent()
     data class LyricTick(val lyric: String, val trackKey: String) : MusicUpdateEvent()

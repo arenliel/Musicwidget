@@ -1265,7 +1265,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
                 // INIT RAM (v2.8): Sincronizamos la memoria con el disco al arrancar
                 serviceScope.launch {
-                    MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo, isRehydration = true))
+                    MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo, isRehydration = true, statsResolved = true))
                 }
                 
                 InternalLogger.d(applicationContext, "[DIAGNOSTIC] Punteros de estado y RAM rehidratados desde DataStore.")
@@ -2363,12 +2363,13 @@ class MusicNotificationListener : NotificationListenerService() {
             val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
             val currentInfo = musicDataStore.musicInfoFlow.first()
             
-            // Hallazgo v3.7: Inmunidad de Salida.
-            val (plays, skip, freq) = when {
-                isSessionEnded -> Triple(0, 0, false)
-                !isPlaying -> Triple(currentMem.playsToday, currentMem.skipStreak, currentMem.isFrequentArtist)
-                else -> musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
-            }
+            // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): esta sección es la vía rápida, sin
+            // espera de portada — ya no necesita calcular estos 3 campos con cuidado, porque
+            // reconcileNewSession (MusicStateProvider.kt) los ignora salvo que el emisor confirme
+            // statsResolved=true (ver commitMutex, más abajo, que es quien sí lo hace). Se
+            // preserva el último valor conocido solo para que memInfo quede internamente
+            // coherente; el valor real llega y se aplica solo por la vía de commitMutex.
+            val (plays, skip, freq) = Triple(currentMem.playsToday, currentMem.skipStreak, currentMem.isFrequentArtist)
             
             val memInfo = MusicInfo(
                 title = snapshot.title,
@@ -2748,7 +2749,10 @@ class MusicNotificationListener : NotificationListenerService() {
                     
                     // Hallazgo v3.9: Warm-up de RAM ya inyectado en bitmapCache
                     // REGLA DE ORO (v4.0): El Árbitro reconcilia el commit de disco
-                    val changedRAM = MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(finalMusicInfo))
+                    // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): esta es la única vía que
+                    // calcula playsToday/skipStreak/isFrequentArtist con getStatsFor (línea de
+                    // arriba) — es la fuente autorizada, así que confirma statsResolved=true.
+                    val changedRAM = MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(finalMusicInfo, statsResolved = true))
 
                     // PROMOCIÓN DE IDENTIDAD (v2.8): Ahora que el disco tiene la imagen y la llave,
                     // sincronizamos la RAM al 100% para mostrar el nuevo artwork.

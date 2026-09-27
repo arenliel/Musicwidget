@@ -3,6 +3,7 @@ package arenliel.musicwidget
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -465,6 +466,13 @@ class MusicDataStore(
      */
     val musicInfoFlow: Flow<MusicInfo> =
         context.dataStore.data.map { prefs ->
+            // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): antes cada uno de estos 3 campos
+            // tenía su propia copia de la fórmula, independiente de getStatsFor — la de
+            // skipStreak quedó rota (esquema JSON de antes de Bendecida-1) sin que nadie lo
+            // notara porque el widget nunca lee por esta vía. Ahora comparten una sola función
+            // con getStatsFor, para que no puedan volver a divergir en silencio.
+            val (statsPlaysToday, statsSkipStreak, statsIsFrequentArtist) =
+                computeStatsFrom(prefs, prefs[TITLE] ?: DEFAULT_TITLE, prefs[ARTIST] ?: DEFAULT_ARTIST)
 
             MusicInfo(
 
@@ -552,12 +560,7 @@ class MusicDataStore(
                     } else rawHistory
                 },
 
-                playsToday = run {
-                    val title = prefs[TITLE] ?: ""
-                    val artist = prefs[ARTIST] ?: ""
-                    val statsMap = decodeRepeatStats(prefs[REPEAT_STATS].orEmpty())
-                    statsMap["$title|$artist"]?.playsToday ?: 0
-                },
+                playsToday = statsPlaysToday,
 
                 streakDays = run {
                     val title = prefs[TITLE] ?: ""
@@ -566,29 +569,9 @@ class MusicDataStore(
                     statsMap["$title|$artist"]?.streakDays ?: 0
                 },
 
-                skipStreak = run {
-                    val title = prefs[TITLE] ?: ""
-                    val artist = prefs[ARTIST] ?: ""
-                    val json = prefs[SKIP_STREAKS].orEmpty()
-                    if (json.isBlank()) 0 else {
-                        runCatching {
-                            val obj = JSONObject(json)
-                            obj.optInt("$title|$artist", 0)
-                        }.getOrDefault(0)
-                    }
-                },
+                skipStreak = statsSkipStreak,
 
-                isFrequentArtist = run {
-                    val artist = prefs[ARTIST] ?: ""
-                    if (artist.isBlank()) false else {
-                        val statsMap = decodeArtistStats(prefs[ARTIST_STATS].orEmpty())
-                        val key = artist.trim().lowercase()
-                        val stats = statsMap[key]
-                        val today = java.time.LocalDate.now().toEpochDay()
-                        
-                        stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 30)
-                    }
-                }
+                isFrequentArtist = statsIsFrequentArtist
             )
         }
 
@@ -1302,7 +1285,23 @@ class MusicDataStore(
      */
     suspend fun getStatsFor(title: String, artist: String): Triple<Int, Int, Boolean> {
         val prefs = context.dataStore.data.first()
-        
+        val (playsToday, skipStreak, isFrequent) = computeStatsFrom(prefs, title, artist)
+
+        val artistGapDebug = if (artist.isNotBlank()) {
+            decodeArtistStats(prefs[ARTIST_STATS].orEmpty())[artist.trim().lowercase()]?.let { java.time.LocalDate.now().toEpochDay() - it.lastPlayedEpochDay }
+        } else null
+        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=$playsToday, skipStreak=$skipStreak, isFrequent=$isFrequent, artistGapDias=$artistGapDebug")
+
+        return Triple(playsToday, skipStreak, isFrequent)
+    }
+
+    /**
+     * Conjunto Corrección-Carrera-Stats-1 (Ronda 2): única fuente de verdad para
+     * playsToday/skipStreak/isFrequentArtist, usada tanto por musicInfoFlow como por
+     * getStatsFor — antes cada uno tenía su propia copia, y una (skipStreak en musicInfoFlow)
+     * quedó desactualizada respecto al formato real de SKIP_STREAKS sin que nada lo detectara.
+     */
+    private fun computeStatsFrom(prefs: Preferences, title: String, artist: String): Triple<Int, Int, Boolean> {
         val playsToday = run {
             val statsMap = decodeRepeatStats(prefs[REPEAT_STATS].orEmpty())
             statsMap["$title|$artist"]?.playsToday ?: 0
@@ -1330,11 +1329,6 @@ class MusicDataStore(
             val today = java.time.LocalDate.now().toEpochDay()
             stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 30)
         }
-
-        val artistGapDebug = if (artist.isNotBlank()) {
-            decodeArtistStats(prefs[ARTIST_STATS].orEmpty())[artist.trim().lowercase()]?.let { java.time.LocalDate.now().toEpochDay() - it.lastPlayedEpochDay }
-        } else null
-        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=$playsToday, skipStreak=$skipStreak, isFrequent=$isFrequent, artistGapDias=$artistGapDebug")
 
         return Triple(playsToday, skipStreak, isFrequent)
     }
