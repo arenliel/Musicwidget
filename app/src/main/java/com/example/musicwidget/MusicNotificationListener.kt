@@ -3246,34 +3246,45 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     private suspend fun downloadBitmapFromUrl(urlString: String): Bitmap? = withContext(Dispatchers.IO) {
-        var connection: java.net.HttpURLConnection? = null
-        try {
-            connection = java.net.URL(urlString).openConnection() as java.net.HttpURLConnection
-            connection.connectTimeout = NETWORK_CONNECT_TIMEOUT_MS
-            connection.readTimeout = NETWORK_READ_TIMEOUT_MS
-            connection.instanceFollowRedirects = true
-            connection.doInput = true
-            connection.useCaches = true
-            connection.connect()
-            if (connection.responseCode !in 200..299) {
-                Log.w(TAG, "HTTP ${connection.responseCode} descargando artwork")
-                return@withContext null
+        // Conjunto Portada-Reintento-Red-1: esta es la única rama de findRealAlbumArt que hace
+        // una descarga de red real (a diferencia de los pasos que leen metadata embebida o la
+        // notificación activa, donde la ausencia de bitmap significa que genuinamente no existe,
+        // no que algo haya fallado). Un fallo aquí puede ser transitorio (blip de red), así que
+        // vale la pena un reintento corto y acotado — ver diseno-reintento-descarga-portada-1.md.
+        repeat(ARTWORK_DOWNLOAD_MAX_ATTEMPTS) { attempt ->
+            var connection: java.net.HttpURLConnection? = null
+            try {
+                connection = java.net.URL(urlString).openConnection() as java.net.HttpURLConnection
+                connection.connectTimeout = NETWORK_CONNECT_TIMEOUT_MS
+                connection.readTimeout = NETWORK_READ_TIMEOUT_MS
+                connection.instanceFollowRedirects = true
+                connection.doInput = true
+                connection.useCaches = true
+                connection.connect()
+                if (connection.responseCode !in 200..299) {
+                    Log.w(TAG, "HTTP ${connection.responseCode} descargando artwork (intento ${attempt + 1}/$ARTWORK_DOWNLOAD_MAX_ATTEMPTS)")
+                } else {
+                    connection.inputStream.use { input ->
+                        if (!isActive) return@withContext null
+                        val bitmap = decodeSampledBitmapFromStream(input, MAX_ART_DIMENSION, MAX_ART_DIMENSION)
+                        if (bitmap != null) return@withContext bitmap
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                if (e is java.net.SocketException && !isActive) {
+                    // Silently ignore
+                } else {
+                    Log.e(TAG, "Fallo descargando artwork (intento ${attempt + 1}/$ARTWORK_DOWNLOAD_MAX_ATTEMPTS): $urlString", e)
+                }
+            } finally {
+                connection?.disconnect()
             }
-            connection.inputStream.use { input ->
-                if (!isActive) return@withContext null
-                decodeSampledBitmapFromStream(input, MAX_ART_DIMENSION, MAX_ART_DIMENSION)
+            if (attempt < ARTWORK_DOWNLOAD_MAX_ATTEMPTS - 1) {
+                delay(ARTWORK_DOWNLOAD_RETRY_DELAY_MS)
             }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            if (e is java.net.SocketException && !isActive) {
-                // Silently ignore
-            } else {
-                Log.e(TAG, "Fallo descargando artwork: $urlString", e)
-            }
-            null
-        } finally {
-            connection?.disconnect()
         }
+        null
     }
 
     private fun decodeSampledBitmapFromStream(inputStream: java.io.InputStream, reqWidth: Int, reqHeight: Int): Bitmap? {
@@ -3464,11 +3475,19 @@ class MusicNotificationListener : NotificationListenerService() {
     private const val NORMAL_DEBOUNCE_MS = 150L
         private const val FAST_DEBOUNCE_MS = 100L
         private const val METADATA_STABILIZATION_MS = 400L
-        private const val NETWORK_CONNECT_TIMEOUT_MS = 3000
-        private const val NETWORK_READ_TIMEOUT_MS = 3000
+        private const val NETWORK_CONNECT_TIMEOUT_MS = 2000
+        private const val NETWORK_READ_TIMEOUT_MS = 2000
         private const val ARTWORK_CACHE_SIZE_KB = 8 * 1024
         private const val ARTWORK_TIMEOUT_MS = 7000L
-        private const val ARTWORK_PROMOTION_TIMEOUT_MS = 3500L
+        // Conjunto Portada-Reintento-Red-1: antes ARTWORK_PROMOTION_TIMEOUT_MS (3500ms) era
+        // MENOR que el peor caso de un solo intento de descarga (hasta 6000ms con los timeouts
+        // anteriores de 3000+3000) — el límite externo cortaba la descarga antes de que ella
+        // misma pudiera fallar limpiamente por su propio timeout. Ampliado a 6000ms para dar
+        // espacio real a los 2 intentos más cortos definidos abajo. Ver diseno-reintento-descarga-
+        // portada-1.md para el razonamiento completo de cada cifra.
+        private const val ARTWORK_PROMOTION_TIMEOUT_MS = 6000L
+        private const val ARTWORK_DOWNLOAD_MAX_ATTEMPTS = 2
+        private const val ARTWORK_DOWNLOAD_RETRY_DELAY_MS = 500L
         // Conjunto Portada-Fuente-Unica-1: SPOTIFY_MEDIA_API_PREFIX/SPOTIFY_CDN_PREFIX se
         // movieron a ArtworkUriResolver.kt, única fuente de verdad para esta traducción.
         private const val DISK_SHIELD_FILE = "current_artwork_raw.webp"
