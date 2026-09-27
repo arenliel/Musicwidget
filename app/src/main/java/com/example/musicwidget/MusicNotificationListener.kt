@@ -1263,10 +1263,15 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
                 }
 
-                // INIT RAM (v2.8): Sincronizamos la memoria con el disco al arrancar
-                serviceScope.launch {
-                    MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo, isRehydration = true, statsResolved = true))
-                }
+                // INIT RAM (v2.8): Sincronizamos la memoria con el disco al arrancar.
+                // Conjunto Carrera-Arranque-1: antes esto corría en su propia corrutina hija,
+                // sin esperarla, mientras bootGate.complete() se llamaba unas líneas más abajo
+                // de todos modos — abriendo una ventana real (aunque angosta) donde
+                // processSnapshot() ya podía arrancar (bootGate ya abierta) mientras la RAM
+                // todavía no reflejaba la sesión rehidratada. applyEvent() es una función barata
+                // (un Mutex sin contención + una comparación pura + una escritura de StateFlow,
+                // sin E/S), así que esperarla aquí no añade una demora perceptible al arranque.
+                MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(currentInfo, isRehydration = true, statsResolved = true))
                 
                 InternalLogger.d(applicationContext, "[DIAGNOSTIC] Punteros de estado y RAM rehidratados desde DataStore.")
             }
