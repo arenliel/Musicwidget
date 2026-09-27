@@ -201,8 +201,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val dataStore = MusicDataStore(context)
         
         provideContent {
-            // FAST-TRACK SSOT (v2.0): Priorizamos la memoria sobre el disco
-            val memInfo by MusicStateProvider.musicInfoState.collectAsState()
+            // Conjunto Identidad-Atómica-Presentación-1: el widget deja de leer la verdad interna
+            // (siempre al día, incluso a medio resolver) y pasa a leer la verdad retenida — solo
+            // se actualiza cuando título, artista, portada y las 4 métricas están confirmados.
+            val memInfo by MusicStateProvider.presentedInfoState.collectAsState()
             val diskInfo by dataStore.musicInfoFlow.collectAsState(
                 initial = MusicNotificationListener.getLatestMusicInfo() ?: MusicInfo(title = "", artist = "", packageName = "")
             )

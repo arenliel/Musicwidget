@@ -165,7 +165,16 @@ data class MusicInfo(
      * Versión del esquema de identidad (v7.0).
      * Permite migrar registros antiguos a la nueva sanitización.
      */
-    val identitySchemaVersion: Int = 0
+    val identitySchemaVersion: Int = 0,
+
+    /*
+     * Conjunto Identidad-Atómica-Presentación-1: indica si esta identidad está
+     * 100% lista para mostrarse (metadatos + portada + las 4 métricas confirmados).
+     * Default `true` a propósito: solo la vía rápida de MusicStateProvider (canción
+     * recién cambiada, aún sin resolver) lo pone en `false` explícitamente — nada
+     * más en el proyecto necesita preocuparse por este campo.
+     */
+    val isPresentationReady: Boolean = true
 ) {
     /**
      * DETERMINISMO DE ESTADO: Indica si el widget está en una instalación fresca (v1.7.0).
@@ -466,12 +475,11 @@ class MusicDataStore(
      */
     val musicInfoFlow: Flow<MusicInfo> =
         context.dataStore.data.map { prefs ->
-            // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): antes cada uno de estos 3 campos
-            // tenía su propia copia de la fórmula, independiente de getStatsFor — la de
-            // skipStreak quedó rota (esquema JSON de antes de Bendecida-1) sin que nadie lo
-            // notara porque el widget nunca lee por esta vía. Ahora comparten una sola función
-            // con getStatsFor, para que no puedan volver a divergir en silencio.
-            val (statsPlaysToday, statsSkipStreak, statsIsFrequentArtist) =
+            // Conjunto Corrección-Carrera-Stats-1 (Ronda 2) + Identidad-Atómica-Presentación-1:
+            // los 4 campos de estadística comparten una sola función con getStatsFor — antes
+            // streakDays tenía aquí su propia copia de la consulta a REPEAT_STATS, separada de
+            // playsToday/skipStreak/isFrequentArtist, sin ninguna razón para estar aparte.
+            val stats =
                 computeStatsFrom(prefs, prefs[TITLE] ?: DEFAULT_TITLE, prefs[ARTIST] ?: DEFAULT_ARTIST)
 
             MusicInfo(
@@ -560,18 +568,13 @@ class MusicDataStore(
                     } else rawHistory
                 },
 
-                playsToday = statsPlaysToday,
+                playsToday = stats.playsToday,
 
-                streakDays = run {
-                    val title = prefs[TITLE] ?: ""
-                    val artist = prefs[ARTIST] ?: ""
-                    val statsMap = decodeRepeatStats(prefs[REPEAT_STATS].orEmpty())
-                    statsMap["$title|$artist"]?.streakDays ?: 0
-                },
+                streakDays = stats.streakDays,
 
-                skipStreak = statsSkipStreak,
+                skipStreak = stats.skipStreak,
 
-                isFrequentArtist = statsIsFrequentArtist
+                isFrequentArtist = stats.isFrequentArtist
             )
         }
 
@@ -1280,19 +1283,31 @@ class MusicDataStore(
     }
 
     /**
+     * Conjunto Identidad-Atómica-Presentación-1: antes un Triple<Int, Int, Boolean>. Se agrega
+     * streakDays (racha de repetición diaria) como 4to valor — vive en el mismo registro
+     * (RepeatStats) que playsToday, pero nunca se propagaba hasta la tarjeta "sonando ahora".
+     */
+    data class SongStats(
+        val playsToday: Int,
+        val skipStreak: Int,
+        val isFrequentArtist: Boolean,
+        val streakDays: Int
+    )
+
+    /**
      * Sincronía Atómica de Analítica (v3.0): Obtiene las rachas y estatus de favorito 
      * para una canción específica sin depender del estado actual del DataStore.
      */
-    suspend fun getStatsFor(title: String, artist: String): Triple<Int, Int, Boolean> {
+    suspend fun getStatsFor(title: String, artist: String): SongStats {
         val prefs = context.dataStore.data.first()
-        val (playsToday, skipStreak, isFrequent) = computeStatsFrom(prefs, title, artist)
+        val stats = computeStatsFrom(prefs, title, artist)
 
         val artistGapDebug = if (artist.isNotBlank()) {
             decodeArtistStats(prefs[ARTIST_STATS].orEmpty())[artist.trim().lowercase()]?.let { java.time.LocalDate.now().toEpochDay() - it.lastPlayedEpochDay }
         } else null
-        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=$playsToday, skipStreak=$skipStreak, isFrequent=$isFrequent, artistGapDias=$artistGapDebug")
+        android.util.Log.d("STREAK_TRACE", "Lectura getStatsFor: identity=$title|$artist, playsToday=${stats.playsToday}, skipStreak=${stats.skipStreak}, isFrequent=${stats.isFrequentArtist}, streakDays=${stats.streakDays}, artistGapDias=$artistGapDebug")
 
-        return Triple(playsToday, skipStreak, isFrequent)
+        return stats
     }
 
     /**
@@ -1300,12 +1315,14 @@ class MusicDataStore(
      * playsToday/skipStreak/isFrequentArtist, usada tanto por musicInfoFlow como por
      * getStatsFor — antes cada uno tenía su propia copia, y una (skipStreak en musicInfoFlow)
      * quedó desactualizada respecto al formato real de SKIP_STREAKS sin que nada lo detectara.
+     * Conjunto Identidad-Atómica-Presentación-1: se agrega streakDays, mismo criterio — evitar
+     * una segunda copia de la misma consulta a REPEAT_STATS (ver musicInfoFlow, Cambio 3).
      */
-    private fun computeStatsFrom(prefs: Preferences, title: String, artist: String): Triple<Int, Int, Boolean> {
-        val playsToday = run {
-            val statsMap = decodeRepeatStats(prefs[REPEAT_STATS].orEmpty())
-            statsMap["$title|$artist"]?.playsToday ?: 0
-        }
+    private fun computeStatsFrom(prefs: Preferences, title: String, artist: String): SongStats {
+        val repeatStats = decodeRepeatStats(prefs[REPEAT_STATS].orEmpty())["$title|$artist"]
+
+        val playsToday = repeatStats?.playsToday ?: 0
+        val streakDays = repeatStats?.streakDays ?: 0
 
         val skipStreak = run {
             val json = prefs[SKIP_STREAKS].orEmpty()
@@ -1330,6 +1347,6 @@ class MusicDataStore(
             stats != null && stats.distinctDaysHeard >= 5 && (today - stats.lastPlayedEpochDay <= 30)
         }
 
-        return Triple(playsToday, skipStreak, isFrequent)
+        return SongStats(playsToday, skipStreak, isFrequent, streakDays)
     }
 }

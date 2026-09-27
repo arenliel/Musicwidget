@@ -2694,7 +2694,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     // snapshot.trackKey (incluye duración) (Conjunto Letras-Atomicas-3).
                     val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
 
-                    val (playsToday, skipStreak, isFrequent) = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
+                    val songStats = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
 
                     // REGLA Artwork-3: Guardar imagen resuelta con verificación de identidad síncrona
                     val (finalArtworkKey, finalArtworkUri) = if (artIncoherent) {
@@ -2736,9 +2736,13 @@ class MusicNotificationListener : NotificationListenerService() {
                         playbackDeviceType = snapshot.playbackDeviceType,
                         durationMs = snapshot.durationMs,
                         history = currentInfo.history,
-                        playsToday = playsToday,
-                        skipStreak = skipStreak,
-                        isFrequentArtist = isFrequent,
+                        playsToday = songStats.playsToday,
+                        skipStreak = songStats.skipStreak,
+                        isFrequentArtist = songStats.isFrequentArtist,
+                        // Conjunto Identidad-Atómica-Presentación-1: antes este campo nunca se
+                        // fijaba aquí y quedaba en su valor por defecto (0) — el sello de racha de
+                        // repetición diaria nunca se disparaba en la tarjeta "sonando ahora".
+                        streakDays = songStats.streakDays,
                         sessionUUID = session?.sessionUUID ?: "",
                         isPendingCommit = false,
                         lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs

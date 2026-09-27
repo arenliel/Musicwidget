@@ -27,6 +27,14 @@ object MusicStateProvider {
 
     private val _musicInfoState = MutableStateFlow<MusicInfo>(safeInitialState)
     val musicInfoState: StateFlow<MusicInfo> = _musicInfoState.asStateFlow()
+
+    // Conjunto Identidad-Atómica-Presentación-1: espejo de _musicInfoState que solo se actualiza
+    // cuando la identidad está 100% lista para mostrarse (isPresentationReady == true). Esta es
+    // la única fuente que el widget debe leer (ver MusicWidget.kt) — todo lo demás en el proyecto
+    // (letras, detector de zombie, gatekeeper de Stage 1) sigue leyendo musicInfoState/current(),
+    // porque necesita la identidad real al instante, no la versión retenida.
+    private val _presentedInfoState = MutableStateFlow<MusicInfo>(safeInitialState)
+    val presentedInfoState: StateFlow<MusicInfo> = _presentedInfoState.asStateFlow()
     
     private val mutationMutex = Mutex()
 
@@ -47,6 +55,9 @@ object MusicStateProvider {
         if (next == current) return@withLock false
         
         _musicInfoState.value = next
+        if (next.isPresentationReady) {
+            _presentedInfoState.value = next
+        }
         return@withLock true
     }
 
@@ -81,11 +92,18 @@ object MusicStateProvider {
             lastUpdateEpoch = if (shouldResetClock) System.currentTimeMillis() else current.lastUpdateEpoch,
             observedAtRealtime = if (shouldResetClock) android.os.SystemClock.elapsedRealtime() else current.observedAtRealtime,
             // Conjunto Corrección-Carrera-Stats-1 (Ronda 2): garantía estructural. Un NewSession
-            // que no confirma statsResolved=true nunca puede pisar estos 3 campos, sin importar
+            // que no confirma statsResolved=true nunca puede pisar estos 4 campos, sin importar
             // qué traiga e.info — así se cierra la carrera de raíz, no solo en el emisor de hoy.
+            // Conjunto Identidad-Atómica-Presentación-1: streakDays se agrega a este mismo
+            // blindaje (antes solo cubría playsToday/skipStreak/isFrequentArtist).
             playsToday = if (e.statsResolved) e.info.playsToday else current.playsToday,
             skipStreak = if (e.statsResolved) e.info.skipStreak else current.skipStreak,
-            isFrequentArtist = if (e.statsResolved) e.info.isFrequentArtist else current.isFrequentArtist
+            isFrequentArtist = if (e.statsResolved) e.info.isFrequentArtist else current.isFrequentArtist,
+            streakDays = if (e.statsResolved) e.info.streakDays else current.streakDays,
+            // Conjunto Identidad-Atómica-Presentación-1: la pieza central del diseño. statsResolved
+            // ya significa "portada+métricas confirmadas" (ver los 3 emisores de NewSession en
+            // MusicNotificationListener.kt) — reutilizarlo aquí evita inventar una señal nueva.
+            isPresentationReady = e.statsResolved
         )
     }
 
