@@ -197,6 +197,11 @@ class MusicNotificationListener : NotificationListenerService() {
         // segundos" de runPausedLyricsCycle no debe activarse — ver ese sitio para el
         // porqué completo (caso "Paranoia").
         var hasConfirmedPlayback: Boolean = false,
+        // Conjunto Instrumentacion-Letras-Display-1: evita loguear "primera letra mostrada" más
+        // de una vez por sesión — se pone en true la primera vez que updateLyricInWidget escribe
+        // una letra no vacía para esta sesión. Al ser un campo nuevo de esta data class, cada
+        // instancia (cada canción) nace con su propio valor en false; no requiere reinicio manual.
+        var firstLyricDisplayLogged: Boolean = false,
         val startedAtRealtime: Long = android.os.SystemClock.elapsedRealtime(),
         var playbackContext: PlaybackContext,
         val context: Context
@@ -2992,6 +2997,19 @@ class MusicNotificationListener : NotificationListenerService() {
             if (applied) {
                 uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
             }
+
+            // Conjunto Instrumentacion-Letras-Display-1: mide, para cada canción, cuánto tardó en
+            // aparecer su PRIMERA letra real desde que la sesión nació — el dato que hace falta
+            // para validar en campo la corrección de auditoria-regresion-latencia-letras-ronda1.md
+            // sin tener que reconstruir la cuenta a mano desde varios logs distintos.
+            if (applied && lyric.isNotBlank()) {
+                val session = currentLogicalSession
+                if (session != null && session.sessionIdentity == trackKey && !session.firstLyricDisplayLogged) {
+                    session.firstLyricDisplayLogged = true
+                    val elapsedMs = android.os.SystemClock.elapsedRealtime() - session.startedAtRealtime
+                    InternalLogger.d(applicationContext, "[LYRICS_DISPLAY_TRACE] Primera letra mostrada: track=${session.identity.title}, artist=${session.identity.artist}, sessionUUID=${session.sessionUUID}, elapsedDesdeInicioSesionMs=$elapsedMs, lyric=\"$lyric\"")
+                }
+            }
         }
     }
 
@@ -3030,20 +3048,33 @@ class MusicNotificationListener : NotificationListenerService() {
                     token == targetToken
                 }
             } else null
+            // Conjunto Instrumentacion-IconTier-2: registra por cuál de las 3 estrategias se
+            // encontró (o no) la notificación de origen — necesario para validar técnicamente por
+            // qué una sesión termina o no en TIER_NOTIFICATION, sin adivinar a partir del
+            // resultado final.
+            var matchStrategy = if (mediaNotif != null) "token" else "ninguna_todavia"
 
             // 1.2 Fallback: Match por PackageName + MediaSession Extra
             if (mediaNotif == null) {
                 mediaNotif = notifications.firstOrNull {
                     it.packageName == packageName && it.notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION)
                 }
+                if (mediaNotif != null) matchStrategy = "package_mas_extra_mediasession"
             }
 
             // 1.3 Fallback final: Match por PackageName
             if (mediaNotif == null) {
                 mediaNotif = notifications.firstOrNull { it.packageName == packageName }
+                if (mediaNotif != null) matchStrategy = "solo_package"
             }
+            if (mediaNotif == null) matchStrategy = "ninguna"
 
+            val smallIconDisponible = mediaNotif?.notification?.smallIcon != null
             val iconFromNotif = mediaNotif?.notification?.smallIcon?.loadDrawable(this)?.toBitmap()
+            // Conjunto Instrumentacion-IconTier-2: evidencia cruda de lo que la notificación
+            // activa realmente ofrecía en este intento, independiente de si terminó promoviendo
+            // el tier o no (eso ya lo cubre ICON_TIER_TRACE, Cambio B1).
+            InternalLogger.d(applicationContext, "[ICON_MEDIASESSION_TRACE] package=$packageName, notificacionesActivas=${notifications.size}, estrategiaMatch=$matchStrategy, notificacionEncontrada=${mediaNotif != null}, smallIconDisponible=$smallIconDisponible, drawableCargado=${iconFromNotif != null}")
 
             val candidate: Pair<Bitmap, Int>? = if (iconFromNotif != null) {
                 Bitmap.createScaledBitmap(iconFromNotif, targetSizePx, targetSizePx, true) to TIER_NOTIFICATION
@@ -3051,6 +3082,17 @@ class MusicNotificationListener : NotificationListenerService() {
                 // PRIORIDAD 2/3: delegadas al registro permanente por paquete.
                 IconRegistry.resolveStaticIcon(applicationContext, packageName, targetSizePx)
             }
+
+            // Conjunto Instrumentacion-IconTier-1: nombre legible para no tener que memorizar los
+            // enteros 0-3 de TIER_NONE/COLOR/MONOCHROME/NOTIFICATION al leer los logs.
+            fun tierName(t: Int) = when (t) {
+                TIER_NOTIFICATION -> "NOTIFICATION"
+                TIER_MONOCHROME -> "MONOCHROME"
+                TIER_COLOR -> "COLOR"
+                else -> "NONE"
+            }
+            val tierBefore = currentIconTier
+            val sessionForLog = currentLogicalSession
 
             if (candidate != null && (appChanged || candidate.second > currentIconTier)) {
                 val (icon, tier) = candidate
@@ -3076,6 +3118,9 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
                 }
                 InternalLogger.d(applicationContext, "[DIAGNOSTIC] ICON_ASCENT: Icono confirmado en tier=$tier para $packageName")
+                InternalLogger.d(applicationContext, "[ICON_TIER_TRACE] Promovido: sessionUUID=${sessionForLog?.sessionUUID}, track=${sessionForLog?.identity?.title}, artist=${sessionForLog?.identity?.artist}, package=$packageName, tierAntes=${tierName(tierBefore)}, tierDespues=${tierName(tier)}, appChanged=$appChanged")
+            } else {
+                InternalLogger.d(applicationContext, "[ICON_TIER_TRACE] Sin promoción: sessionUUID=${sessionForLog?.sessionUUID}, track=${sessionForLog?.identity?.title}, artist=${sessionForLog?.identity?.artist}, package=$packageName, tierActual=${tierName(tierBefore)}, tierCandidato=${candidate?.second?.let { tierName(it) } ?: "sin_candidato"}, appChanged=$appChanged")
             }
         }
     }
