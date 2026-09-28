@@ -161,17 +161,54 @@ object IconRegistry {
                 // seguimos abajo y recalculamos como si fuera la primera vez.
             }
 
+            // Conjunto Icono-Sesion-Reanudada-1: distingue una negativa CONFIRMADA (Android
+            // mismo, o la propia versión de la plataforma, dicen que esta app no tiene capa
+            // monochrome) de un simple fallo de extracción (una excepción en cualquier punto
+            // de la cadena: obtener el ícono, castear a AdaptiveIconDrawable, renderizar o
+            // normalizar el bitmap). Antes, un único runCatching envolvía TODA la cadena y
+            // CUALQUIER excepción — incluida una transitoria, sin relación con si la capa
+            // existe — se traducía en monoBitmap == null, indistinguible de "esta app no
+            // tiene monochrome". Esa conclusión se escribía PERMANENTEMENTE en el manifiesto
+            // (hasMonochrome=false), sin ningún reintento posible hasta la próxima
+            // actualización real de la app (currentUpdateTime cambia). Ver
+            // auditoria-icono-sesion-reanudada-ronda1.md.
             var monoBitmap: Bitmap? = null
+            var monochromeConfirmedAbsent = false
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                runCatching {
-                    val appIcon = pm.getApplicationIcon(packageName)
+                val appIcon = runCatching { pm.getApplicationIcon(packageName) }.getOrNull()
+                if (appIcon != null) {
                     if (appIcon is AdaptiveIconDrawable) {
-                        appIcon.monochrome?.let { monochrome ->
-                            val raw = getNativeAwareMonochromeBitmap(context, monochrome)
-                            monoBitmap = ImageUtils.normalizeIcon(raw, isColorFallback = false, targetSizePx = targetSizePx)
+                        val monochrome = appIcon.monochrome
+                        if (monochrome != null) {
+                            // La capa existe: cualquier fallo de aquí en adelante es de
+                            // renderizado/normalización, no una ausencia — no se marca como
+                            // confirmada, para que se reintente en la próxima llamada.
+                            runCatching {
+                                val raw = getNativeAwareMonochromeBitmap(context, monochrome)
+                                ImageUtils.normalizeIcon(raw, isColorFallback = false, targetSizePx = targetSizePx)
+                            }.onSuccess { monoBitmap = it }
+                        } else {
+                            // Negativa confirmada por la propia API: esta app no tiene capa
+                            // monochrome.
+                            monochromeConfirmedAbsent = true
                         }
+                    } else {
+                        // Negativa confirmada: el ícono de la app ni siquiera es un
+                        // AdaptiveIconDrawable, así que no puede tener capa monochrome.
+                        monochromeConfirmedAbsent = true
                     }
                 }
+                // Si appIcon es null (getApplicationIcon lanzó excepción), no sabemos nada
+                // todavía: monochromeConfirmedAbsent queda en false y se reintentará en la
+                // próxima llamada, en vez de cachearse como una ausencia que nunca se
+                // confirmó de verdad.
+            } else {
+                // Por debajo de Android 13 (Tiramisu), la capa monochrome no existe como
+                // concepto en la plataforma — no es un fallo transitorio, es una ausencia
+                // permanente e inherente a la versión del sistema operativo. Se cachea igual
+                // que una negativa confirmada, para no recalcular en cada llamada.
+                monochromeConfirmedAbsent = true
             }
 
             val colorBitmap: Bitmap? = runCatching {
@@ -187,12 +224,23 @@ object IconRegistry {
                 saveBitmapAtomically(colorFile(context, packageName), colorBitmap)
             }
 
-            val newEntry = JSONObject().apply {
-                put("lastUpdateTime", currentUpdateTime)
-                put("hasMonochrome", resolvedMono != null)
+            // Solo escribimos en el manifiesto (y por lo tanto solo cacheamos una respuesta
+            // sobre monochrome) cuando tenemos una conclusión definitiva: o bien se resolvió
+            // con éxito, o bien quedó confirmada su ausencia. Un fallo transitorio de
+            // extracción ya no se cachea — la próxima llamada (tryPromoteAppIcon reintenta en
+            // cada snapshot mientras el tier siga por debajo de TIER_NOTIFICATION) lo vuelve a
+            // intentar desde cero, en vez de quedar atascada con una negativa falsa hasta la
+            // próxima actualización real de la app.
+            if (resolvedMono != null || monochromeConfirmedAbsent) {
+                val newEntry = JSONObject().apply {
+                    put("lastUpdateTime", currentUpdateTime)
+                    put("hasMonochrome", resolvedMono != null)
+                }
+                manifest.put(packageName, newEntry)
+                saveManifest(context, manifest)
             }
-            manifest.put(packageName, newEntry)
-            saveManifest(context, manifest)
+
+            InternalLogger.d(context, "[ICON_REGISTRY_TRACE] package=$packageName, monoResuelto=${resolvedMono != null}, monochromeConfirmedAbsent=$monochromeConfirmedAbsent, colorResuelto=${colorBitmap != null}, cacheEscrita=${resolvedMono != null || monochromeConfirmedAbsent}")
 
             when {
                 resolvedMono != null -> resolvedMono to TIER_MONOCHROME

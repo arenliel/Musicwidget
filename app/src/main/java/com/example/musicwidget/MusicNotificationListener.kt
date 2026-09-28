@@ -2110,14 +2110,32 @@ class MusicNotificationListener : NotificationListenerService() {
         }
 
         val appChanged = previousLogical?.packageName != rawSnapshot.packageName
-        
+
         if (appChanged) {
-            currentIconTier = TIER_NONE
-            // REGLA: Limpieza de Iconos (Icon Fix) ante cambios de app
-            saveTextToFile("", APP_ICON_KEY_FILE)
-            saveTextToFile("", APP_ICON_TIER_FILE)
-            savedAppIconKey = null
-            
+            // Conjunto Icono-Sesion-Reanudada-1: antes, este bloque limpiaba
+            // incondicionalmente savedAppIconKey/currentIconTier ante CUALQUIER cambio de
+            // paquete respecto a la sesión lógica anterior — incluyendo el caso de una app
+            // que YA tenía su ícono confirmado y simplemente reanuda reproducción tras un
+            // hueco (p. ej. su notificación/sesión de MediaSession se destruyó por
+            // inactividad prolongada y la app vuelve a sonar más tarde). Esa limpieza
+            // destruía savedAppIconKey ANTES de que tryPromoteAppIcon pudiera comprobar su
+            // propia protección "alreadyIconifiedForThisPackage" (Correccion-Carrera-
+            // Icono-1): para cuando esa función se ejecutaba, el valor que necesita ya había
+            // sido borrado aquí, así que esa protección nunca llegaba a activarse en este
+            // escenario. Ver auditoria-icono-sesion-reanudada-ronda1.md.
+            //
+            // Ahora la limpieza de estado solo se aplica si el paquete entrante NO es el
+            // mismo que ya tiene el ícono confirmado — es decir, solo ante un cambio de app
+            // genuino, nunca ante la reanudación de la misma app.
+            val alreadyIconifiedForIncomingPackage = savedAppIconKey == "${rawSnapshot.packageName}_stable"
+            if (!alreadyIconifiedForIncomingPackage) {
+                currentIconTier = TIER_NONE
+                // REGLA: Limpieza de Iconos (Icon Fix) ante cambios de app
+                saveTextToFile("", APP_ICON_KEY_FILE)
+                saveTextToFile("", APP_ICON_TIER_FILE)
+                savedAppIconKey = null
+            }
+
             // Hallazgo v3.4: Limpieza preventiva de RAM en transición
             serviceScope.launch {
                 MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(0L)) // Simulamos fin de sesión
@@ -2133,6 +2151,11 @@ class MusicNotificationListener : NotificationListenerService() {
             // punto donde antes competía por commitMutex con el commit de portada. No cambia
             // ninguna decisión de tier por sí mismo: solo dispara resolveStaticIcon, que ya
             // sirve el resultado desde caché si ya estaba resuelto.
+            //
+            // Esto sigue siendo incondicional a propósito (Conjunto Icono-Sesion-Reanudada-1
+            // no lo toca): precalentar de más nunca es incorrecto (resolveStaticIcon sirve
+            // desde caché si ya estaba resuelto), y SessionEnded(0L) simula el fin de la
+            // sesión lógica anterior independientemente de si el ícono se reinicia o no.
             val warmupPackageName = rawSnapshot.packageName
             if (warmupPackageName.isNotBlank()) {
                 serviceScope.launch {
@@ -3042,9 +3065,13 @@ class MusicNotificationListener : NotificationListenerService() {
      *
      * Todo el ciclo "leer el tier actual -> resolver un candidato -> decidir si es mejor ->
      * escribir" ocurre atómicamente dentro de commitMutex: ninguna otra parte de la clase lee
-     * o escribe savedAppIconKey/currentIconTier fuera de esta función (con la única excepción
-     * del reset incondicional en processSnapshot cuando appChanged es true, que es una
-     * limpieza, no una decisión, y por lo tanto no participa de la misma carrera).
+     * o escribe savedAppIconKey/currentIconTier fuera de esta función, con la única excepción
+     * del reset en processSnapshot cuando appChanged es true (Conjunto Icono-Sesion-
+     * Reanudada-1: ese reset dejó de ser incondicional — solo se ejecuta si el paquete
+     * entrante no coincide con el que ya tiene ícono confirmado, ver
+     * alreadyIconifiedForIncomingPackage en processSnapshot). Sigue siendo una limpieza de
+     * estado ante un cambio de app genuino, no una decisión de qué ícono usar, y por lo tanto
+     * no participa de la misma carrera que esta función resuelve.
      */
     private suspend fun tryPromoteAppIcon(packageName: String, appChanged: Boolean) {
         commitMutex.withLock {
