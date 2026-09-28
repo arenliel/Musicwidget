@@ -82,7 +82,12 @@ object WidgetRecoveryGuard {
                         // El host ya reconoce el ID: forzamos un redibujado real con los
                         // datos actuales en vez de esperar a que la próxima recomposición
                         // espontánea (p. ej. la siguiente canción) lo haga por casualidad.
-                        runCatching { widget.update(context, glanceId) }
+                        // Conjunto DataStore-Choke-Point-1: este redibujado va por el mismo
+                        // mutex que MusicWidget.updateAll() — sin esto, una recuperación en
+                        // curso podía pedirle a Glance que redibuje este mismo appWidgetId al
+                        // mismo tiempo que una actualización normal, chocando por el DataStore
+                        // interno de Glance (ver auditoria-datastore-duplicado-widget-ronda1.md).
+                        runCatching { MusicWidget.withGlanceUpdateLock { widget.update(context, glanceId) } }
                         return true
                     }
 

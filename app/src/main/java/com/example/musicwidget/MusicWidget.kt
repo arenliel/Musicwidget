@@ -70,6 +70,8 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /**
@@ -148,12 +150,31 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
 
         fun clearMemoryCache() { bitmapCache.evictAll() }
 
+        // Conjunto DataStore-Choke-Point-1: Glance mantiene internamente un DataStore de
+        // preferencias por appWidgetId (PreferencesGlanceStateDefinition) que no tolera dos
+        // aperturas concurrentes para el mismo archivo. Antes, updateAll() no tenía ninguna
+        // protección de concurrencia, y era llamada desde 5 corrutinas independientes y sin
+        // coordinar entre sí dentro de MusicNotificationListener.kt (además de
+        // WidgetRecoveryGuard, ver abajo) — dos de esas llamadas podían solaparse en
+        // reproducción activa y pedirle a Glance que redibuje el MISMO widget a la vez,
+        // produciendo "IllegalStateException: There are multiple DataStores active for the
+        // same file" (ver auditoria-datastore-duplicado-widget-ronda1.md). Este mutex es
+        // ahora el único cuello de botella real: no se expone directamente, solo a través de
+        // withGlanceUpdateLock, para que cualquier código que necesite pedirle algo a Glance
+        // (aquí, o en WidgetRecoveryGuard) pase por el mismo turno.
+        private val glanceUpdateMutex = Mutex()
+
+        suspend fun <T> withGlanceUpdateLock(block: suspend () -> T): T =
+            glanceUpdateMutex.withLock { block() }
+
         suspend fun updateAll(context: Context) {
-            InternalLogger.init(context)
-            InternalLogger.log(context, "UPDATE: Disparando actualización en cascada (Global).")
-            // Actualización determinista basada en la enumeración de identidades (v1.6.3)
-            WidgetAppearance.values().forEach { appearance ->
-                runCatching { appearance.updateAll(context) }
+            withGlanceUpdateLock {
+                InternalLogger.init(context)
+                InternalLogger.log(context, "UPDATE: Disparando actualización en cascada (Global).")
+                // Actualización determinista basada en la enumeración de identidades (v1.6.3)
+                WidgetAppearance.values().forEach { appearance ->
+                    runCatching { appearance.updateAll(context) }
+                }
             }
         }
     }
