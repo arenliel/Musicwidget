@@ -2030,6 +2030,15 @@ class MusicNotificationListener : NotificationListenerService() {
 
         val trackContentChanged = previousLogical?.artworkKey != rawSnapshot.artworkKey
 
+        // Conjunto Letras-Duracion-Confirmada-1: una actualización cuyo único cambio real es que
+        // la duración pasó de "desconocida" (<=0) a un valor real ya no puede tratarse como un
+        // duplicado sin información nueva. Sin esta señal, tanto el guard de deduplicación (ver
+        // más abajo) como el enrutamiento de eventos descartaban esa corrección en silencio,
+        // dejando a MusicStateProvider con una duración obsoleta indefinidamente — y por lo tanto
+        // sin que relaunchLyricsTicker pudiera completar nunca la búsqueda de letras pospuesta por
+        // Conjunto Letras-Atomicas-12. Ver auditoria-regresion-latencia-letras-ronda1.md.
+        val durationJustConfirmed = currentMem.durationMs <= 0L && rawSnapshot.durationMs > 0L
+
         // Paso 2.2: GUARD CLAUSE (Evita procesar snapshots redundantes en Disco)
         // REGLA VIP: Si vienes de un Catch-up, ignoramos la deduplicación para forzar el renderizado visual.
         val isCatchUp = reason == "catch_up_render"
@@ -2054,7 +2063,7 @@ class MusicNotificationListener : NotificationListenerService() {
         // recomputed, and without touching `trackContentChanged`'s own correct meaning for its
         // other uses elsewhere in this function.
         // Bloqueamos ráfagas antes de entrar al Mutex o realizar cálculos analíticos.
-        if (!isCatchUp && !trackContentChanged && !sessionChanged && !artIncoherent && 
+        if (!isCatchUp && !trackContentChanged && !durationJustConfirmed && !sessionChanged && !artIncoherent && 
             currentMem.isPlaying == (rawSnapshot.playbackState == PlaybackState.STATE_PLAYING) && 
             currentMem.isSessionActive == rawSnapshot.isSessionActive) {
             
@@ -2355,7 +2364,10 @@ class MusicNotificationListener : NotificationListenerService() {
         }
 
         val isSessionEnded = sessionEnded
-        val isTrackContentChanged = trackContentChanged
+        // Conjunto Letras-Duracion-Confirmada-1: además del cambio de portada, una duración
+        // recién confirmada también debe enrutarse como "contenido afinado" (MetadataRefinement),
+        // nunca como un simple StatusUpdate (que no persiste durationMs) — ver Cambio 1.
+        val isTrackContentChanged = trackContentChanged || durationJustConfirmed
 
         // Letras-Atomicas-11: se elimina el serviceScope.launch que diferia esta actualización.
         // processSnapshot ya es suspend; diferir esto a una corrutina aparte abría una ventana
@@ -2419,7 +2431,10 @@ class MusicNotificationListener : NotificationListenerService() {
                 relaunchLyricsTicker("identity_change")
             } else {
                 val stateChangedUI = currentMem.isPlaying != isPlaying
-                if (stateChangedUI) relaunchLyricsTicker("state_sync")
+                // Conjunto Letras-Duracion-Confirmada-1: la confirmación de duración por sí sola
+                // (sin cambio de isPlaying) debe relanzar el motor de letras — es exactamente la
+                // señal que Conjunto Letras-Atomicas-12 dejó pendiente de emitir.
+                if (stateChangedUI || durationJustConfirmed) relaunchLyricsTicker("state_sync")
             }
         }
         // Solo guardamos de forma anticipada si el widget NO es visible (gating activo).
@@ -2576,8 +2591,15 @@ class MusicNotificationListener : NotificationListenerService() {
                         currentLyrics = result
                         currentLyricsIdentity = MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist)
                         relaunchLyricsTicker("identity_change")
-                    } else if (isActive) {
+                    } else if (isActive && freshInfo.durationMs > 0L) {
                         // PUNTO E: Fallback Silencioso - Si falla la API, limpiamos el widget
+                        // Conjunto Letras-Duracion-Confirmada-1: este "no encontrado" solo es
+                        // definitivo cuando la duración ya estaba confirmada al consultar. Si
+                        // durationMs<=0, LyricsRepository pospuso la consulta a propósito
+                        // (Atomicas-12/9) y el null NO significa "no existe" — borrar el widget
+                        // aquí silenciaría una canción que sí tiene letra, solo que aún no se pudo
+                        // confirmar su duración. En ese caso no se toca el widget: los Cambios 1-5
+                        // garantizan el reintento en cuanto la duración se confirme.
                         InternalLogger.d(applicationContext, "[LYRICS_TRACE] Fallback Silencioso: No se encontraron letras.")
                         updateLyricInWidget(MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist), "")
                     }
@@ -2762,6 +2784,16 @@ class MusicNotificationListener : NotificationListenerService() {
                     // calcula playsToday/skipStreak/isFrequentArtist con getStatsFor (línea de
                     // arriba) — es la fuente autorizada, así que confirma statsResolved=true.
                     val changedRAM = MusicStateProvider.applyEvent(MusicUpdateEvent.NewSession(finalMusicInfo, statsResolved = true))
+
+                    // Conjunto Letras-Duracion-Confirmada-1: esta es la vía que más confiablemente
+                    // termina corrigiendo la duración (finalMusicInfo.durationMs siempre viene de
+                    // snapshot.durationMs, sin condiciones), pero hasta ahora nunca avisaba al
+                    // motor de letras (ninguna llamada a relaunchLyricsTicker vive dentro de este
+                    // bloque). Se relanza aquí también, sin depender de que Stage 1 ya lo haya
+                    // detectado — las dos vías quedan simétricas e independientes.
+                    if (currentInfo.durationMs <= 0L && finalMusicInfo.durationMs > 0L) {
+                        relaunchLyricsTicker("duration_confirmed")
+                    }
 
                     // PROMOCIÓN DE IDENTIDAD (v2.8): Ahora que el disco tiene la imagen y la llave,
                     // sincronizamos la RAM al 100% para mostrar el nuevo artwork.
