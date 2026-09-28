@@ -457,10 +457,16 @@ class MusicNotificationListener : NotificationListenerService() {
             }
         }
 
-        // Sincronización de recuperación:
-        // Forzamos al proceso a descargar recursos que se omitieron durante el bloqueo.
-        serviceScope.launch {
-            refreshBestSession(reason = "catch_up_render")
+        // Sincronización de recuperación (Conjunto Correccion-Carrera-Icono-1): antes esto
+        // lanzaba su propia corrutina, totalmente independiente de pendingRefreshJob, así que
+        // podía ejecutar processSnapshot() en paralelo con cualquier otro refresco ya en
+        // curso (p.ej. uno disparado por onMetadataChanged milisegundos antes). Dos
+        // invocaciones concurrentes de processSnapshot() podían pisarse entre sí — ver
+        // auditoria-icono-carrera-resincronizacion-ronda1.md para el caso concreto que esto
+        // producía sobre el ícono de la app. Ahora pasa por el mismo mecanismo de
+        // cancelación que usa el resto de los disparadores: el refresco más reciente cancela
+        // automáticamente al anterior, en vez de que dos corran a la vez.
+        requestRefresh(fast = true, reason = "catch_up_render") {
             // PASO 4: Iniciar reconciliación del historial pendiente
             reconcilePendingHistoryArtworks()
         }
@@ -1507,7 +1513,8 @@ class MusicNotificationListener : NotificationListenerService() {
 
     private fun requestRefresh(
         fast: Boolean = false,
-        reason: String
+        reason: String,
+        onAfterRefresh: (suspend () -> Unit)? = null
     ) {
 
         pendingRefreshJob?.cancel()
@@ -1538,6 +1545,20 @@ class MusicNotificationListener : NotificationListenerService() {
                     refreshBestSession(
                         reason
                     )
+
+                    // Conjunto Correccion-Carrera-Icono-1: acción opcional a ejecutar DESPUÉS
+                    // de refreshBestSession, dentro del mismo job cancelable por
+                    // pendingRefreshJob. Antes, onDisplayFullyVisible() lanzaba su propia
+                    // corrutina independiente para encadenar reconcilePendingHistoryArtworks()
+                    // tras su propio refresco — esa corrutina nunca pasaba por
+                    // pendingRefreshJob, así que nada la cancelaba si un refresco más reciente
+                    // (de cualquier otro disparador) llegaba mientras tanto, permitiendo que
+                    // dos invocaciones de processSnapshot() corrieran a la vez (ver
+                    // auditoria-icono-carrera-resincronizacion-ronda1.md). Ahora cualquier
+                    // llamador que necesite encadenar trabajo lo pasa aquí, y hereda
+                    // automáticamente la misma cancelación que ya protege a
+                    // refreshBestSession.
+                    onAfterRefresh?.invoke()
 
                 } catch (
                     e: CancellationException
@@ -3027,7 +3048,19 @@ class MusicNotificationListener : NotificationListenerService() {
      */
     private suspend fun tryPromoteAppIcon(packageName: String, appChanged: Boolean) {
         commitMutex.withLock {
-            if (appChanged) {
+            // Conjunto Correccion-Carrera-Icono-1 (blindaje defensivo): `appChanged` es una
+            // bandera capturada por el LLAMADOR, en processSnapshot, ANTES de la espera (hasta
+            // 3.5s, ARTWORK_PROMOTION_TIMEOUT_MS) por la resolución de portada — no antes de
+            // adquirir este candado. Si mientras tanto otra invocación más rápida ya resolvió
+            // y confirmó el ícono correcto para este mismo packageName (guardándolo en
+            // savedAppIconKey), la bandera capturada por esta invocación quedó desactualizada:
+            // ya no describe la realidad en el instante en que efectivamente tomamos el
+            // candado. Reconfirmamos aquí, con el estado ya persistido (fresco), si el reset
+            // sigue siendo necesario — ver auditoria-icono-carrera-resincronizacion-ronda1.md.
+            val alreadyIconifiedForThisPackage = savedAppIconKey == "${packageName}_stable"
+            val shouldReset = appChanged && !alreadyIconifiedForThisPackage
+
+            if (shouldReset) {
                 savedAppIconKey = null
                 currentIconTier = TIER_NONE
                 saveTextToFile("", APP_ICON_KEY_FILE)
@@ -3094,7 +3127,7 @@ class MusicNotificationListener : NotificationListenerService() {
             val tierBefore = currentIconTier
             val sessionForLog = currentLogicalSession
 
-            if (candidate != null && (appChanged || candidate.second > currentIconTier)) {
+            if (candidate != null && (shouldReset || candidate.second > currentIconTier)) {
                 val (icon, tier) = candidate
                 val iconKey = "${packageName}_stable"
                 saveBitmapToFile(icon, APP_ICON_FILE)
@@ -3118,9 +3151,9 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
                 }
                 InternalLogger.d(applicationContext, "[DIAGNOSTIC] ICON_ASCENT: Icono confirmado en tier=$tier para $packageName")
-                InternalLogger.d(applicationContext, "[ICON_TIER_TRACE] Promovido: sessionUUID=${sessionForLog?.sessionUUID}, track=${sessionForLog?.identity?.title}, artist=${sessionForLog?.identity?.artist}, package=$packageName, tierAntes=${tierName(tierBefore)}, tierDespues=${tierName(tier)}, appChanged=$appChanged")
+                InternalLogger.d(applicationContext, "[ICON_TIER_TRACE] Promovido: sessionUUID=${sessionForLog?.sessionUUID}, track=${sessionForLog?.identity?.title}, artist=${sessionForLog?.identity?.artist}, package=$packageName, tierAntes=${tierName(tierBefore)}, tierDespues=${tierName(tier)}, appChanged=$appChanged, resetAplicado=$shouldReset")
             } else {
-                InternalLogger.d(applicationContext, "[ICON_TIER_TRACE] Sin promoción: sessionUUID=${sessionForLog?.sessionUUID}, track=${sessionForLog?.identity?.title}, artist=${sessionForLog?.identity?.artist}, package=$packageName, tierActual=${tierName(tierBefore)}, tierCandidato=${candidate?.second?.let { tierName(it) } ?: "sin_candidato"}, appChanged=$appChanged")
+                InternalLogger.d(applicationContext, "[ICON_TIER_TRACE] Sin promoción: sessionUUID=${sessionForLog?.sessionUUID}, track=${sessionForLog?.identity?.title}, artist=${sessionForLog?.identity?.artist}, package=$packageName, tierActual=${tierName(tierBefore)}, tierCandidato=${candidate?.second?.let { tierName(it) } ?: "sin_candidato"}, appChanged=$appChanged, resetAplicado=$shouldReset")
             }
         }
     }

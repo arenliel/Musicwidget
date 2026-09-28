@@ -10,6 +10,10 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 object PermissionUtils {
 
@@ -173,6 +177,14 @@ object PermissionUtils {
      * (sin listas de paquetes hardcodeadas): enumera las apps con actividad de LAUNCHER
      * (ya declarado en <queries>) y las filtra con [isNativeMusicApp].
      */
+    // Conjunto Correccion-Carrera-Icono-1 (Pieza 3): scope propio, de vida ligada al
+    // proceso, exclusivamente para precalentar en segundo plano el registro de íconos
+    // estáticos (IconRegistry) de las apps detectadas en la pantalla de configuración. No se
+    // cancela nunca a propósito — es trabajo de "mejor esfuerzo" que puede sobrevivir a la
+    // pantalla que lo disparó (si el usuario sale de Ajustes antes de que termine, el
+    // precalentado sigue igual, ya que su único efecto es dejar la caché en disco lista).
+    private val iconWarmupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     fun getInstalledMusicApps(context: Context): List<AppItem> {
         val pm = context.packageManager
         val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -182,7 +194,7 @@ object PermissionUtils {
             .map { it.activityInfo.packageName }
             .toSet()
 
-        return launcherPackages
+        val result = launcherPackages
             .filter { isNativeMusicApp(context, it) }
             .mapNotNull { pkg ->
                 runCatching {
@@ -196,5 +208,29 @@ object PermissionUtils {
                 }.getOrNull()
             }
             .sortedBy { it.name }
+
+        // Conjunto Correccion-Carrera-Icono-1 (Pieza 3): apenas se detecta una app de música,
+        // se dispara en segundo plano la resolución de su ícono estático (monochrome si
+        // existe, si no color), reutilizando IconRegistry.resolveStaticIcon tal cual existe
+        // hoy — sin esperar el resultado ni bloquear esta lista. Así, para cuando esa app
+        // suene de verdad por primera vez, su ícono estático ya está resuelto y en caché, en
+        // vez de tener que resolverse en caliente durante una reproducción real.
+        //
+        // IMPORTANTE: el tamaño (targetSizePx) usado aquí debe coincidir exactamente con el
+        // que usa MusicNotificationListener.tryPromoteAppIcon para pedir el mismo ícono en
+        // tiempo real — IconRegistry no vuelve a escalar un bitmap servido desde caché, así
+        // que un tamaño distinto en cualquiera de los dos puntos haría que se sirviera un
+        // ícono del tamaño equivocado sin ningún error visible. Si alguna vez cambia el
+        // tamaño en un lado, debe cambiarse igual en el otro.
+        val appContext = context.applicationContext
+        val density = appContext.resources.displayMetrics.density
+        val targetSizePx = (14 * density).toInt()
+        result.forEach { app ->
+            iconWarmupScope.launch {
+                IconRegistry.resolveStaticIcon(appContext, app.packageName, targetSizePx)
+            }
+        }
+
+        return result
     }
 }
