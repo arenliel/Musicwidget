@@ -3354,16 +3354,33 @@ class MusicNotificationListener : NotificationListenerService() {
         // Conjunto Portada-Fuente-Unica-1: la traducción de URIs conocidas (Spotify, etc.)
         // ahora vive únicamente en ArtworkUriResolver — ver ese archivo para el porqué.
         val resolvedUri = ArtworkUriResolver.resolveKnownUri(uriString)
+
+        // Conjunto Saneamiento-ArtworkUri-1: "artworkUri" no siempre contiene una URI real —
+        // ver auditoria-conflacion-artworkuri-identidad-ronda1.md. Cuando una app no entrega
+        // ninguna portada por ningún medio (metadata, bitmap embebido, ícono de notificación
+        // útil — el caso confirmado de YouTube) y el servicio se reinicia en el momento
+        // exacto, este mismo campo puede terminar cargando la clave interna de identidad
+        // ("paquete|título|artista|álbum") en vez de una URI. Esta función es la única puerta
+        // de entrada real a un intento de lectura/descarga — findRealAlbumArt,
+        // reconcilePendingHistoryArtworks, y cualquier llamador futuro pasan siempre por
+        // aquí — así que blindarla en este único punto cierra la clase completa de este
+        // error para cualquier app, presente o futura, sin que cada llamador tenga que
+        // aprender a reconocer el caso especial por su cuenta.
+        if (!ArtworkUriResolver.isFetchableUri(resolvedUri)) {
+            InternalLogger.d(applicationContext, "[ART_TRACE] decodeAlbumArtUri: valor no es una URI descargable/legible, se omite sin intentarlo. Valor=$resolvedUri")
+            return null
+        }
+
         if (resolvedUri.startsWith("http://") || resolvedUri.startsWith("https://")) {
             return downloadBitmapFromUrl(resolvedUri)
         }
         return try {
-            contentResolver.openInputStream(Uri.parse(uriString))?.use { input ->
+            contentResolver.openInputStream(Uri.parse(resolvedUri))?.use { input ->
                 decodeSampledBitmapFromStream(input, MAX_ART_DIMENSION, MAX_ART_DIMENSION)
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "Fallo al decodificar URI: $uriString", e)
+            Log.e(TAG, "Fallo al decodificar URI: $resolvedUri", e)
             null
         }
     }

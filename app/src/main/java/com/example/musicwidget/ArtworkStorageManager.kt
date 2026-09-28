@@ -2,6 +2,7 @@ package arenliel.musicwidget
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import java.io.File
@@ -19,7 +20,10 @@ object ArtworkStorageManager {
     /**
      * Guarda una portada para el historial de forma permanente y atómica.
      * @param identifier El sessionUUID de la sesión (v9.0).
-     * @return Ruta absoluta del archivo guardado.
+     * @return URI `file://` del archivo guardado (Conjunto Saneamiento-ArtworkUri-1: nunca una
+     *   ruta cruda sin esquema — así cualquier consumidor que reciba este valor en un campo
+     *   "artworkUri" puede confiar en que, si lo usa, ArtworkUriResolver.isFetchableUri lo
+     *   reconocerá correctamente como legible, igual que una URI remota real).
      */
     fun saveHistoryArtwork(context: Context, bitmap: Bitmap, identifier: String): String {
         val historyDir = File(context.filesDir, "history")
@@ -56,6 +60,6 @@ object ArtworkStorageManager {
             if (tempFile.exists()) tempFile.delete()
         }
 
-        return finalFile.absolutePath
+        return Uri.fromFile(finalFile).toString()
     }
 }
