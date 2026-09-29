@@ -253,6 +253,9 @@ class MusicNotificationListener : NotificationListenerService() {
     private var lyricsFetchJob: Job? = null
     private var unlockPollingJob: Job? = null
 
+    // Conjunto Controles-Posicion-1: refresco periódico de la barra de progreso del widget Control.
+    private var progressTickJob: Job? = null
+
     /*
      * Flow para procesar eventos de Seek con compensación de latencia.
      */
@@ -431,6 +434,32 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
+    // Conjunto Controles-Posicion-1: mantiene vivo, solo mientras hace falta, un refresco barato de
+    // la barra de progreso. Condiciones para seguir vivo en cada vuelta: pantalla encendida y
+    // desbloqueada (misma compuerta que el resto del servicio), reproduciendo, y al menos un
+    // widget Control colocado. Si alguna falla, el ticker se detiene solo y se relanza en el
+    // siguiente snapshot procesado o al desbloquear. Solo redibuja el widget Control (no los otros
+    // dos tipos) y pasa por el mismo mutex de Glance que el resto de actualizaciones.
+    // isPlayingHint: el snapshot que se acaba de procesar puede llegar antes de que la RAM lo refleje.
+    private fun ensureProgressTicker(isPlayingHint: Boolean = false) {
+        if (progressTickJob?.isActive == true) return
+        if (!isPlayingHint && !MusicStateProvider.current().isPlaying) return
+        progressTickJob = serviceScope.launch {
+            while (isActive) {
+                delay(PROGRESS_TICK_MS)
+                if (!isWidgetPotentiallyVisible() || !MusicStateProvider.current().isPlaying) break
+                val hasControlWidget = runCatching {
+                    GlanceAppWidgetManager(applicationContext).getGlanceIds(LargeMusicWidget::class.java).isNotEmpty()
+                }.getOrDefault(false)
+                if (!hasControlWidget) break
+                InternalLogger.d(applicationContext, "[PROGRESS_TRACE] tick: refrescando widget Control")
+                MusicWidget.withGlanceUpdateLock {
+                    runCatching { WidgetAppearance.PILL_CONTROL.updateAll(applicationContext) }
+                }
+            }
+        }
+    }
+
     private fun isWidgetPotentiallyVisible(): Boolean {
         val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
         val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
@@ -443,11 +472,13 @@ class MusicNotificationListener : NotificationListenerService() {
         InternalLogger.log(applicationContext, "GATING: Pantalla apagada. Compuerta CERRADA.")
         lyricsUpdateJob?.cancel()
         unlockPollingJob?.cancel()
+        progressTickJob?.cancel()
     }
 
     private fun onDisplayFullyVisible() {
         InternalLogger.d(applicationContext, "[GATING] Display fully visible. Triggering Wake-up Sync.")
         InternalLogger.log(applicationContext, "GATING: Desbloqueo detectado. Forzando reprocesamiento de sesión.")
+        ensureProgressTicker()
         
         if (hasPendingUpdates) {
             InternalLogger.d(applicationContext, "[GATING] Aplicando actualizaciones postergadas a Glance.")
@@ -721,6 +752,14 @@ class MusicNotificationListener : NotificationListenerService() {
                         observedAtRealtime = now
                     )
                     lastLogicalSnapshot = updatedSnapshot
+                    // Conjunto Controles-Posicion-1: el seek también mueve la barra de progreso.
+                    PlaybackClock.publish(
+                        sessionIdentity = updatedSnapshot.sessionIdentity,
+                        positionMs = updatedSnapshot.positionMs,
+                        positionUpdatedAtRealtime = updatedSnapshot.positionUpdatedAtRealtime,
+                        playbackSpeed = updatedSnapshot.playbackSpeed,
+                        durationMs = updatedSnapshot.durationMs
+                    )
                     relaunchLyricsTicker("seek_event")
                 }
         }
@@ -751,6 +790,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     // 2. Limpieza en Memoria del Listener (v2.2)
                     lastAppliedSnapshot = null
                     lastLogicalSnapshot = null
+                    PlaybackClock.clear()
                     lastObservedSnapshot = null
                     inFlightSnapshot = null
                     savedAppIconKey = null
@@ -2397,6 +2437,15 @@ class MusicNotificationListener : NotificationListenerService() {
         // ACTUALIZACIÓN DEL DIARIO LÓGICO (Cierres-3)
         lastLogicalSnapshot = rawSnapshot
         lastAppliedSnapshot = snapshot
+        // Conjunto Controles-Posicion-1: ancla de posición para la barra de progreso del widget.
+        PlaybackClock.publish(
+            sessionIdentity = rawSnapshot.sessionIdentity,
+            positionMs = rawSnapshot.positionMs,
+            positionUpdatedAtRealtime = rawSnapshot.positionUpdatedAtRealtime,
+            playbackSpeed = rawSnapshot.playbackSpeed,
+            durationMs = rawSnapshot.durationMs
+        )
+        ensureProgressTicker(isPlayingHint = rawSnapshot.playbackState == PlaybackState.STATE_PLAYING)
         lastObservedPositionMs = currentProjectedPos
 
         // ACTIVE WATCHER (v4.3.1): Cronómetro proactivo de 5s con LATE-READ
@@ -3619,6 +3668,8 @@ class MusicNotificationListener : NotificationListenerService() {
         artworkCache.evictAll()
         lyricsUpdateJob?.cancel()
         lyricsFetchJob?.cancel()
+        progressTickJob?.cancel()
+        PlaybackClock.clear()
         Log.d(TAG, "[DIAGNOSTIC] SERVICE_LIFECYCLE: onDestroy - Process ending")
         serviceJob.cancel()
         super.onDestroy()
@@ -3626,6 +3677,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
     companion object {
         private const val TAG = "MusicListener"
+        private const val PROGRESS_TICK_MS = 15_000L
         private var lastCommittedInfo: MusicInfo? = null
         fun getLatestMusicInfo(): MusicInfo? = lastCommittedInfo
 
