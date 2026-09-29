@@ -425,20 +425,24 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val size = LocalSize.current
         val showHistory = size.height.value >= 150f
         val widgetPadding = dimen(R.dimen.widget_padding)
+        val badgeReserve = repeatBadgeReserveDp(info)
 
         Column(modifier = GlanceModifier.fillMaxSize().padding(widgetPadding)) {
             // Refactorizado para anclaje inferior de metadatos (v1.5.3)
             Row(modifier = GlanceModifier.fillMaxWidth().height(pillSize), verticalAlignment = Alignment.Top) {
                 AlbumArtWithVisualizer(context, info, albumArtBitmap, isArtworkSynchronized, pillSize)
                 Column(modifier = GlanceModifier.defaultWeight().fillMaxHeight().padding(start = 12.dp)) {
-                    // 1. Badge (Anclaje superior absoluto)
-                    Box(modifier = GlanceModifier.fillMaxWidth(), contentAlignment = Alignment.TopEnd) { RepeatAnalyticsBadge(info = info) }
+                    // Conjunto Badge-Sin-Empuje-1: aquí vivía una SEGUNDA llamada a RepeatAnalyticsBadge, dentro
+                    // de esta columna. El badge ya se dibuja una vez, flotando en la esquina superior derecha
+                    // del widget (Box global en MusicWidgetUI, mismo padding), así que esta copia caía en el
+                    // mismo punto — pero, al estar dentro de la columna, ocupaba altura real y empujaba el
+                    // texto hacia abajo cada vez que aparecía la racha.
                     
                     // 2. Contenedor de Metadatos con Ecuador Visual (v1.6.0)
                     Column(modifier = GlanceModifier.defaultWeight()) {
                         // Segmento A: TOP (Anclado al fondo del área superior)
                         Box(modifier = GlanceModifier.defaultWeight().fillMaxWidth(), contentAlignment = Alignment.BottomStart) {
-                            TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = maxArtistLines, part = TextPart.TOP)
+                            TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = maxArtistLines, part = TextPart.TOP, overlineEndReserve = badgeReserve)
                         }
                         // Segmento B: BOTTOM (Anclado al tope del área inferior)
                         Box(modifier = GlanceModifier.defaultWeight().fillMaxWidth(), contentAlignment = Alignment.TopStart) {
@@ -466,11 +470,12 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     }
 
     @Composable
-    private fun PlaybackStatusIndicator(info: MusicInfo, context: Context) {
+    private fun PlaybackStatusIndicator(info: MusicInfo, context: Context, endReserve: Dp = 0.dp) {
         val status = getStatusText(context, info)
         val isFresh = isSessionFresh(info)
         Text(
             text = if (isFresh) status.uppercase() else status,
+            modifier = GlanceModifier.padding(end = endReserve),
             style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(R.dimen.text_size_status), fontWeight = if (isFresh) FontWeight.Bold else FontWeight.Medium),
             maxLines = 1
         )
@@ -582,6 +587,26 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         }
     }
 
+    // Conjunto Badge-Sin-Empuje-1: decisión única de qué badge de racha corresponde a la canción
+    // actual (antes vivía inline dentro de RepeatAnalyticsBadge). Devuelve (ícono, etiqueta) o null.
+    private fun resolveRepeatBadge(info: MusicInfo): Pair<Int, String>? = when {
+        info.streakDays >= 3 -> Pair(R.drawable.replay_24px, "${info.streakDays}d")
+        info.playsToday >= 3 -> Pair(R.drawable.mode_heat_24px, "${info.playsToday}x")
+        info.skipStreak >= 1 -> Pair(R.drawable.skip_next_24px, if (info.skipStreak >= 3) "${info.skipStreak}x" else "")
+        else -> null
+    }
+
+    // Conjunto Badge-Sin-Empuje-1: ancho estimado (dp) que ocupa el badge en la esquina superior
+    // derecha + 6dp de separación. Se usa SOLO para acortar el texto de estado ("overline") en
+    // Layout4x4 y que nunca se monte debajo del badge (que ahora flota, ya no empuja). Estimación
+    // basada en DesignBadge: padding 8+8, ícono 12, y si hay etiqueta 3 de separación + ~6 por carácter.
+    private fun repeatBadgeReserveDp(info: MusicInfo): Dp {
+        if (info.isEmpty) return 0.dp
+        val badge = resolveRepeatBadge(info) ?: return 0.dp
+        val badgeWidth = if (badge.second.isEmpty()) 28f else 31f + (badge.second.length * 6f)
+        return (badgeWidth + 6f).dp
+    }
+
     @Composable
     private fun RepeatAnalyticsBadge(info: MusicInfo) {
         // OCULTAMIENTO EN ESTADO VACÍO (v1.7.0)
@@ -590,12 +615,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val context = LocalContext.current
         InternalLogger.d(context, "[STREAK_TRACE] Render: origen=now_playing, identity=${info.title}|${info.artist}, skipStreak=${info.skipStreak}, playsToday=${info.playsToday}, isFrequentArtist=${info.isFrequentArtist}")
 
-        val badge = when {
-            info.streakDays >= 3 -> Pair(R.drawable.replay_24px, "${info.streakDays}d")
-            info.playsToday >= 3 -> Pair(R.drawable.mode_heat_24px, "${info.playsToday}x")
-            info.skipStreak >= 1 -> Pair(R.drawable.skip_next_24px, if (info.skipStreak >= 3) "${info.skipStreak}x" else "")
-            else -> null
-        } ?: return
+        val badge = resolveRepeatBadge(info) ?: return
         DesignBadge(iconRes = badge.first, label = badge.second, isTonal = true)
     }
 
@@ -722,7 +742,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     }
 
     @Composable
-    private fun TextInfo(context: Context, info: MusicInfo, appIconBitmap: Bitmap?, showRelativeTime: Boolean, isIconSynchronized: Boolean, maxArtistLines: Int, isStatusLabelVisible: Boolean = true, part: TextPart = TextPart.ALL) {
+    private fun TextInfo(context: Context, info: MusicInfo, appIconBitmap: Bitmap?, showRelativeTime: Boolean, isIconSynchronized: Boolean, maxArtistLines: Int, isStatusLabelVisible: Boolean = true, part: TextPart = TextPart.ALL, overlineEndReserve: Dp = 0.dp) {
         val titleSize = spDimen(R.dimen.text_size_title); val artistSize = spDimen(R.dimen.text_size_artist)
         val fontScale = context.resources.configuration.fontScale; val isHugeFont = fontScale > 1.3f
         
@@ -734,7 +754,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
             if (part == TextPart.ALL || part == TextPart.TOP) {
                 // 1. PlaybackStatusIndicator (Supresión en estado vacío)
                 if (isStatusLabelVisible && !info.isEmpty) { 
-                    PlaybackStatusIndicator(info, context)
+                    PlaybackStatusIndicator(info, context, overlineEndReserve)
                     Spacer(GlanceModifier.size(4.dp)) 
                 }
                 
