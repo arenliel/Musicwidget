@@ -1183,6 +1183,9 @@ class MusicNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        // Conjunto Controles-Puente-1: los botones del widget envían sus comandos al mismo
+        // controlador que el servicio ya eligió (selectBestController), sin reelegir uno propio.
+        TransportBridge.attach { selectedController }
         val bootStart = System.currentTimeMillis()
         InternalLogger.d(applicationContext, "[HIST_BOOT] SERVICE_CONNECTED: Starting rehydration...")
         Log.d(TAG, "[DIAGNOSTIC] PERMISSION_SYNC: Listener connected. Refreshing widget.")
@@ -3573,6 +3576,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         Log.d(TAG, "[DIAGNOSTIC] PERMISSION_SYNC: Listener disconnected. Resetting widget state.")
+        TransportBridge.detach()
         unregisterDynamicScreenReceiver()
         uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
         super.onListenerDisconnected()
@@ -3587,6 +3591,7 @@ class MusicNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        TransportBridge.detach()
         unregisterDynamicScreenReceiver()
         pendingRefreshJob?.cancel()
         artworkInFlightMutex.tryLock().let { locked ->
