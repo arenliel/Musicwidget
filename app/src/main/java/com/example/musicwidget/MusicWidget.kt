@@ -136,13 +136,6 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         private val SIZE_4x2 = DpSize(250.dp, 110.dp)
         private val SIZE_4x4 = DpSize(250.dp, 250.dp)
 
-        // CONSTANTES DEL MOTOR ELÁSTICO (Física de Interfaz)
-        private const val MIN_PILL_SIZE_DP = 80f      // Umbral de supervivencia (Paracaídas)
-        private const val COMFORT_PILL_SIZE_DP = 100f  // Umbral de comodidad (Reducción de líneas)
-        private const val PREMIUM_PILL_SIZE_DP = 110f  // Tamaño máximo
-        private const val SAFETY_GAP_DP = 10f          // Amortiguador de presión
-        private const val TEXT_SPACERS_TOTAL_DP = 6f   // Suma de spacers en TextInfo (4dp + 2dp)
-
         val bitmapCache: LruCache<String, Bitmap> by lazy {
             val maxMemory = Runtime.getRuntime().maxMemory() / 1024
             val cacheSize = (maxMemory / 8).toInt() 
@@ -363,8 +356,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         isArtworkSynchronized: Boolean,
         isIconSynchronized: Boolean,
         forcedAppearance: WidgetAppearance,
-        isPreview: Boolean = false,
-        explicitPillSize: Dp? = null
+        isPreview: Boolean = false
     ) {
         val size = LocalSize.current
         
@@ -392,7 +384,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         } else null
         
         val isActuallyFullBleed = isExplicitSmall || collisionResult?.layoutType == WidgetLayout.FULL_BLEED
-        val isWide = if (isPreview) forcedAppearance == WidgetAppearance.PILL_CONTROL else size.width.value >= 220f
+        val isWide = if (isPreview) forcedAppearance == WidgetAppearance.PILL_CONTROL else CollisionSensor.isWideWidth(size.width.value)
 
         Box(modifier = GlanceModifier.fillMaxSize().cornerRadius(widgetRadius).background(GlanceTheme.colors.widgetBackground)) {
             if (!info.notificationsEnabled || !info.batteryOptimized) {
@@ -401,8 +393,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 if (isActuallyFullBleed) {
                     Layout2x1(context, info, albumArtBitmap, appIconBitmap, isArtworkSynchronized, isIconSynchronized, collisionResult?.maxArtistLines ?: 1)
                 } else if (isWide) {
-                    val availableHeightForPillWide = size.height.value - (widgetPadding.value * 2)
-                    val widePillSize = explicitPillSize ?: availableHeightForPillWide.coerceIn(80f, 110f).dp
+                    // Conjunto Consolidacion-Wide-1: en Wide el texto va al lado, así que la portada no es elástica.
+                    // Layout4x4 solo se dibuja con alto >= LARGE_LAYOUT_MIN_HEIGHT_DP, donde la fórmula anterior
+                    // ((alto - padding).coerceIn(80, 110)) siempre daba 110. Ver CollisionSensorWideTest.
+                    val widePillSize = CollisionSensor.WIDE_PILL_SIZE_DP.dp
                     Layout4x4(context, info, albumArtBitmap, appIconBitmap, isArtworkSynchronized, isIconSynchronized, widePillSize, collisionResult?.maxArtistLines ?: 2)
                 } else {
                     // LAYOUT STANDARD: Estructura de Respiro Garantizado (v1.5.3)
@@ -426,7 +420,6 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     @Composable
     private fun Layout4x4(context: Context, info: MusicInfo, albumArtBitmap: Bitmap?, appIconBitmap: Bitmap?, isArtworkSynchronized: Boolean, isIconSynchronized: Boolean, pillSize: Dp, maxArtistLines: Int) {
         val size = LocalSize.current
-        val showHistory = size.height.value >= 150f
         val widgetPadding = dimen(R.dimen.widget_padding)
         val badgeReserve = repeatBadgeReserveDp(info)
 
@@ -499,28 +492,26 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                         }
                     }
                 }
-                if (showHistory) {
-                    Spacer(GlanceModifier.size(16.dp))
-                    // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
-                    Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
-                        // Conjunto Ajustes-Umbral-1: entre el alto mínimo de los controles y 238dp (píldora máxima) el
-                        // botón play flotante queda sobre el encabezado del historial. Se reserva su ancho (+8dp de aire)
-                        // al final del encabezado para que el botón de limpiar historial siga visible y tocable.
-                        val fabOverHistoryHeader = controls.showControls &&
-                            CollisionSensor.fabOverlapsHistoryHeader(size.height.value, pillSize.value)
-                        HistoryList(
-                            context, info.history, info.sessionIdentity,
-                            headerEndReserve = if (fabOverHistoryHeader) (CollisionSensor.PLAY_BUTTON_WIDTH_DP + 8f).dp else 0.dp
-                        )
+                Spacer(GlanceModifier.size(16.dp))
+                // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
+                Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
+                    // Conjunto Ajustes-Umbral-1: entre el alto mínimo de los controles y 238dp (píldora máxima) el
+                    // botón play flotante queda sobre el encabezado del historial. Se reserva su ancho (+8dp de aire)
+                    // al final del encabezado para que el botón de limpiar historial siga visible y tocable.
+                    val fabOverHistoryHeader = controls.showControls &&
+                        CollisionSensor.fabOverlapsHistoryHeader(size.height.value, pillSize.value)
+                    HistoryList(
+                        context, info.history, info.sessionIdentity,
+                        headerEndReserve = if (fabOverHistoryHeader) (CollisionSensor.PLAY_BUTTON_WIDTH_DP + 8f).dp else 0.dp
+                    )
 
-                        // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
-                        Box(
-                            modifier = GlanceModifier
-                                .fillMaxWidth()
-                                .height(32.dp)
-                                .background(ImageProvider(R.drawable.history_fade_scrim))
-                        ) {}
-                    }
+                    // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
+                    Box(
+                        modifier = GlanceModifier
+                            .fillMaxWidth()
+                            .height(32.dp)
+                            .background(ImageProvider(R.drawable.history_fade_scrim))
+                    ) {}
                 }
             }
             if (controls.showControls) {
@@ -1167,8 +1158,7 @@ private fun MusicWidgetUIWithMock(appearance: WidgetAppearance, title: String = 
         isArtworkSynchronized = true, 
         isIconSynchronized = true, 
         forcedAppearance = appearance, 
-        isPreview = true, 
-        explicitPillSize = null
+        isPreview = true
     )
 }
 

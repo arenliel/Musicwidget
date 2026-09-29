@@ -52,6 +52,24 @@ object CollisionSensor {
     private const val HISTORY_SPACER_DP = 16f       // Spacer entre la fila de píldora y el historial
     private const val HISTORY_HEADER_DP = 28f       // Encabezado del historial: ícono 20dp + 8dp de padding inferior
 
+    // Conjunto Consolidacion-Wide-1: umbrales de conmutación de layout y tamaño de la píldora (SSOT).
+    // Antes eran números sueltos repetidos en evaluate() y en MusicWidgetUI. Los valores NO cambian.
+    //  - PILL_MIN_DP / PILL_MAX_DP: rango de la píldora elástica de Standard. Bajo PILL_MIN_DP hay colisión
+    //    (Full-Bleed); PILL_MAX_DP es además el umbral "premium" para mantener 2 líneas de artista.
+    //  - WIDE_PILL_SIZE_DP: en Wide el texto va AL LADO de la portada, así que la portada no es elástica: es
+    //    siempre PILL_MAX_DP. (Antes: (alto - 34).coerceIn(80, 110); como Wide solo se dibuja desde
+    //    LARGE_LAYOUT_MIN_HEIGHT_DP, esa fórmula siempre daba 110: una prueba lo demuestra.)
+    //  - LARGE_LAYOUT_MIN_HEIGHT_DP: desde este alto el layout es STACKED aunque el cálculo elástico dé colisión.
+    //  - WIDE_MIN_WIDTH_DP: desde este ancho el widget real se dibuja como Wide (el tamaño manda, no la apariencia).
+    const val PILL_MIN_DP = 80f
+    const val PILL_MAX_DP = 110f
+    const val WIDE_PILL_SIZE_DP = PILL_MAX_DP
+    const val LARGE_LAYOUT_MIN_HEIGHT_DP = 180f
+    const val WIDE_MIN_WIDTH_DP = 220f
+
+    /** Conjunto Consolidacion-Wide-1: `true` si el widget real debe dibujarse como Wide (texto al lado de la portada). */
+    fun isWideWidth(widgetWidthDp: Float): Boolean = widgetWidthDp >= WIDE_MIN_WIDTH_DP
+
     fun evaluate(
         availableHeight: Float,
         fontScale: Float,
@@ -70,7 +88,7 @@ object CollisionSensor {
         }
 
         // 2. LÓGICA DEL SENSOR (Solo para variantes con carátula tipo píldora: STANDARD y CONTROL)
-        val isLargeLayout = availableHeight >= 180f
+        val isLargeLayout = availableHeight >= LARGE_LAYOUT_MIN_HEIGHT_DP
         val isStandardIdentity = appearance == WidgetAppearance.PILL_STANDARD
 
         // Constantes SSOT (Single Source of Truth) para la física de colisión
@@ -91,15 +109,15 @@ object CollisionSensor {
 
         // Fase A: Reducción de líneas. Umbral Premium 110dp.
         val projectedPillTwoLines = availableHeight - paddingH - textH2 - safetyGap
-        val forceSingleLineArtist = projectedPillTwoLines < 110f
+        val forceSingleLineArtist = projectedPillTwoLines < PILL_MAX_DP
         val maxArtistLines = if (forceSingleLineArtist) 1 else 2
 
         // Fase B: Píldora Elástica (Cálculo reactivo del tamaño del asset)
         val activeTextH = if (forceSingleLineArtist) textH1 else textH2
         val calculatedPillValue = availableHeight - paddingH - activeTextH - safetyGap
         
-        val pillSizeDp = calculatedPillValue.coerceIn(80f, 110f).dp
-        val hasCollision = calculatedPillValue < 80f
+        val pillSizeDp = calculatedPillValue.coerceIn(PILL_MIN_DP, PILL_MAX_DP).dp
+        val hasCollision = calculatedPillValue < PILL_MIN_DP
         
         val layoutType = when {
             isLargeLayout -> WidgetLayout.STACKED

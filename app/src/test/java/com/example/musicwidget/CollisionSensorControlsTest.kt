@@ -125,14 +125,15 @@ class CollisionSensorControlsTest {
     }
 
     @Test
-    fun integracion_losControlesAparecenDesdeUnos191punto6dp() {
-        // Con 1 línea la píldora mide (alto - 100.8); los controles necesitan 90.8dp de píldora.
+    fun integracion_losControlesAparecenDesdeLos196dp() {
+        // En Wide la píldora es fija (WIDE_PILL_SIZE_DP = 110dp), así que la altura mínima de los controles es
+        // 34 + 110 + 4 + 48 = 196dp. Con 1 línea (alto < 226.4dp) texto + controles necesitan 90.8dp de los 110.
         fun controlsAt(h: Float): Boolean {
             val s = CollisionSensor.evaluate(h, 1.0f, false, WidgetAppearance.PILL_CONTROL)
-            return CollisionSensor.evaluateControls(h, s.pillSize.value, 1.0f, s.maxArtistLines, 144f).showControls
+            return CollisionSensor.evaluateControls(h, CollisionSensor.WIDE_PILL_SIZE_DP, 1.0f, s.maxArtistLines, 144f).showControls
         }
-        assertFalse(controlsAt(191.5f))
-        assertTrue(controlsAt(191.7f))
+        assertFalse(controlsAt(195.9f))
+        assertTrue(controlsAt(196f))
     }
 
     @Test
