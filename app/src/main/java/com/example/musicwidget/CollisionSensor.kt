@@ -70,6 +70,24 @@ object CollisionSensor {
     /** Conjunto Consolidacion-Wide-1: `true` si el widget real debe dibujarse como Wide (texto al lado de la portada). */
     fun isWideWidth(widgetWidthDp: Float): Boolean = widgetWidthDp >= WIDE_MIN_WIDTH_DP
 
+    // Conjunto Previews-Wide-1: geometría horizontal de Wide (SSOT). Antes el "12" vivía suelto en Layout4x4
+    // (padding izquierdo de la columna de texto y su cálculo de ancho) y el ancho mínimo para la barra de
+    // progreso no estaba nombrado en ningún sitio.
+    //  - WIDE_TEXT_COLUMN_START_PADDING_DP: separación portada → columna de texto.
+    //  - WIDE_FULL_PREVIEW_SIZE_DP: lado (cuadrado) de la previsualización generada en el que Wide se ve COMPLETO:
+    //    controles, barra de progreso e historial. Debe ser >= minWideWidthForProgressBarDp() (una prueba lo verifica).
+    const val WIDE_TEXT_COLUMN_START_PADDING_DP = 12f
+    const val WIDE_FULL_PREVIEW_SIZE_DP = 300f
+
+    /** Ancho (dp) de la columna de texto de Wide: ancho del widget - padding lateral - píldora - separación. */
+    fun wideTextColumnWidthDp(widgetWidthDp: Float, pillSizeDp: Float = WIDE_PILL_SIZE_DP): Float =
+        widgetWidthDp - WIDGET_PADDING_TOTAL_DP - pillSizeDp - WIDE_TEXT_COLUMN_START_PADDING_DP
+
+    /** Ancho mínimo (dp) del widget Wide para que se muestre la barra de progreso (columna >= grupo + separación + 40dp). */
+    fun minWideWidthForProgressBarDp(): Float =
+        WIDGET_PADDING_TOTAL_DP + WIDE_PILL_SIZE_DP + WIDE_TEXT_COLUMN_START_PADDING_DP +
+            CONTROLS_GROUP_WIDTH_DP + CONTROLS_BAR_GAP_DP + CONTROLS_BAR_MIN_WIDTH_DP
+
     fun evaluate(
         availableHeight: Float,
         fontScale: Float,

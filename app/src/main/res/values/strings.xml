@@ -7,6 +7,15 @@
     <string name="widget_time_days">Hace días</string>
     <string name="widget_empty_title">Empieza a sonar</string>
     <string name="widget_empty_subtitle">Toca para reproducir algo</string>
+    <!-- Conjunto Previews-Wide-1: datos de ejemplo (ficticios) de la previsualización del selector de widgets -->
+    <string name="preview_sample_title">Noche de verano</string>
+    <string name="preview_sample_artist">Luna Azul</string>
+    <string name="preview_sample_history_1_title">Ciudad de cristal</string>
+    <string name="preview_sample_history_1_artist">Los Faroles</string>
+    <string name="preview_sample_history_2_title">Marea baja</string>
+    <string name="preview_sample_history_2_artist">Ecos del Sur</string>
+    <string name="preview_sample_history_3_title">Camino a casa</string>
+    <string name="preview_sample_history_3_artist">Río Claro</string>
     <string name="widget_permission_title">Faltan permisos</string>
     <string name="widget_permission_subtitle">Toca para habilitar</string>
 

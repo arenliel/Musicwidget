@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="110dp"
+    android:height="110dp"
+    android:viewportWidth="110"
+    android:viewportHeight="110">
+    <group
+        android:pivotX="55"
+        android:pivotY="55"
+        android:rotation="-28">
+        <!-- Conjunto Previews-Wide-1: MISMA cápsula que ic_preview_pill (ratio 0.9, radio = alto/2, girada -28°,
+             como ImageUtils.createRotatedPillBitmap), pero con el color del esqueleto. Una prueba
+             (WidePreviewParityTest) verifica que la geometría sea idéntica. -->
+        <path
+            android:fillColor="@color/music_widget_skeleton"
+            android:pathData="M 49.5,5.5
+                              L 60.5,5.5
+                              A 49.5,49.5 0 0 1 60.5,104.5
+                              L 49.5,104.5
+                              A 49.5,49.5 0 0 1 49.5,5.5
+                              Z" />
+    </group>
+</vector>
