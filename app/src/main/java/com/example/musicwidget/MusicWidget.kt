@@ -53,6 +53,8 @@ import androidx.glance.layout.fillMaxHeight
 import androidx.glance.layout.height
 import androidx.glance.layout.padding
 import androidx.glance.layout.size
+import androidx.glance.layout.width
+import androidx.glance.unit.ColorProvider
 import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
@@ -427,45 +429,209 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val widgetPadding = dimen(R.dimen.widget_padding)
         val badgeReserve = repeatBadgeReserveDp(info)
 
-        Column(modifier = GlanceModifier.fillMaxSize().padding(widgetPadding)) {
-            // Refactorizado para anclaje inferior de metadatos (v1.5.3)
-            Row(modifier = GlanceModifier.fillMaxWidth().height(pillSize), verticalAlignment = Alignment.Top) {
-                AlbumArtWithVisualizer(context, info, albumArtBitmap, isArtworkSynchronized, pillSize)
-                Column(modifier = GlanceModifier.defaultWeight().fillMaxHeight().padding(start = 12.dp)) {
-                    // Conjunto Badge-Sin-Empuje-1: aquí vivía una SEGUNDA llamada a RepeatAnalyticsBadge, dentro
-                    // de esta columna. El badge ya se dibuja una vez, flotando en la esquina superior derecha
-                    // del widget (Box global en MusicWidgetUI, mismo padding), así que esta copia caía en el
-                    // mismo punto — pero, al estar dentro de la columna, ocupaba altura real y empujaba el
-                    // texto hacia abajo cada vez que aparecía la racha.
-                    
-                    // 2. Contenedor de Metadatos con Ecuador Visual (v1.6.0)
-                    Column(modifier = GlanceModifier.defaultWeight()) {
-                        // Segmento A: TOP (Anclado al fondo del área superior)
-                        Box(modifier = GlanceModifier.defaultWeight().fillMaxWidth(), contentAlignment = Alignment.BottomStart) {
-                            TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = maxArtistLines, part = TextPart.TOP, overlineEndReserve = badgeReserve)
-                        }
-                        // Segmento B: BOTTOM (Anclado al tope del área inferior)
-                        Box(modifier = GlanceModifier.defaultWeight().fillMaxWidth(), contentAlignment = Alignment.TopStart) {
-                            TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = maxArtistLines, part = TextPart.BOTTOM)
+        // Conjunto Controles-UI-1: el motor de colisiones decide si caben los controles de
+        // reproducción (todo o nada), cuántas líneas de artista/letra quedan y si hay ancho para la
+        // barra. La columna de texto mide: ancho del widget - padding lateral (2 x 17dp) - píldora
+        // - 12dp de padding izquierdo de la propia columna.
+        val fontScale = context.resources.configuration.fontScale
+        val textColumnWidthDp = size.width.value - (widgetPadding.value * 2f) - pillSize.value - 12f
+        val controls = CollisionSensor.evaluateControls(
+            widgetHeightDp = size.height.value,
+            pillSizeDp = pillSize.value,
+            fontScale = fontScale,
+            sensorMaxArtistLines = maxArtistLines,
+            textColumnWidthDp = textColumnWidthDp
+        )
+
+        Box(modifier = GlanceModifier.fillMaxSize()) {
+            Column(modifier = GlanceModifier.fillMaxSize().padding(widgetPadding)) {
+                // Refactorizado para anclaje inferior de metadatos (v1.5.3)
+                Row(modifier = GlanceModifier.fillMaxWidth().height(pillSize), verticalAlignment = Alignment.Top) {
+                    AlbumArtWithVisualizer(context, info, albumArtBitmap, isArtworkSynchronized, pillSize)
+                    Column(modifier = GlanceModifier.defaultWeight().fillMaxHeight().padding(start = 12.dp)) {
+                        // Conjunto Badge-Sin-Empuje-1: aquí vivía una SEGUNDA llamada a RepeatAnalyticsBadge, dentro
+                        // de esta columna. El badge ya se dibuja una vez, flotando en la esquina superior derecha
+                        // del widget (Box global en MusicWidgetUI, mismo padding), así que esta copia caía en el
+                        // mismo punto — pero, al estar dentro de la columna, ocupaba altura real y empujaba el
+                        // texto hacia abajo cada vez que aparecía la racha.
+
+                        if (controls.showControls) {
+                            // ECUADOR FIJO CON CONTROLES (Controles-UI-1): el bloque superior (estado + título)
+                            // y el bloque de artista/letra tienen alto fijo, calculado por el motor, así que el
+                            // título y el estado NO rebotan cuando la letra pasa de 1 a 2 líneas. El sobrante
+                            // de altura (siempre >= CONTROLS_GAP_DP) queda entre el artista y la fila de controles.
+                            Box(
+                                modifier = GlanceModifier.fillMaxWidth().height(CollisionSensor.topBlockHeightDp(fontScale).dp),
+                                contentAlignment = Alignment.BottomStart
+                            ) {
+                                TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = controls.artistLines, part = TextPart.TOP, overlineEndReserve = badgeReserve)
+                            }
+                            Box(
+                                modifier = GlanceModifier.fillMaxWidth().height(CollisionSensor.artistBlockHeightDp(fontScale, controls.artistLines).dp),
+                                contentAlignment = Alignment.TopStart
+                            ) {
+                                TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = controls.artistLines, part = TextPart.BOTTOM)
+                            }
+                            Spacer(GlanceModifier.defaultWeight())
+                            PlaybackControlsRow(
+                                context = context,
+                                info = info,
+                                showProgressBar = controls.showProgressBar,
+                                barWidthDp = textColumnWidthDp - CollisionSensor.CONTROLS_GROUP_WIDTH_DP - CollisionSensor.CONTROLS_BAR_GAP_DP
+                            )
+                        } else {
+                            // 2. Contenedor de Metadatos con Ecuador Visual (v1.6.0)
+                            Column(modifier = GlanceModifier.defaultWeight()) {
+                                // Segmento A: TOP (Anclado al fondo del área superior)
+                                Box(modifier = GlanceModifier.defaultWeight().fillMaxWidth(), contentAlignment = Alignment.BottomStart) {
+                                    TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = maxArtistLines, part = TextPart.TOP, overlineEndReserve = badgeReserve)
+                                }
+                                // Segmento B: BOTTOM (Anclado al tope del área inferior)
+                                Box(modifier = GlanceModifier.defaultWeight().fillMaxWidth(), contentAlignment = Alignment.TopStart) {
+                                    TextInfo(context, info, appIconBitmap, showRelativeTime = true, isIconSynchronized = isIconSynchronized, maxArtistLines = maxArtistLines, part = TextPart.BOTTOM)
+                                }
+                            }
                         }
                     }
                 }
-            }
-            if (showHistory) {
-                Spacer(GlanceModifier.size(16.dp))
-                // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
-                Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
-                    HistoryList(context, info.history, info.sessionIdentity)
-                    
-                    // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
-                    Box(
-                        modifier = GlanceModifier
-                            .fillMaxWidth()
-                            .height(32.dp)
-                            .background(ImageProvider(R.drawable.history_fade_scrim))
-                    ) {}
+                if (showHistory) {
+                    Spacer(GlanceModifier.size(16.dp))
+                    // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
+                    Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
+                        HistoryList(context, info.history, info.sessionIdentity)
+
+                        // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
+                        Box(
+                            modifier = GlanceModifier
+                                .fillMaxWidth()
+                                .height(32.dp)
+                                .background(ImageProvider(R.drawable.history_fade_scrim))
+                        ) {}
+                    }
                 }
             }
+            if (controls.showControls) {
+                // Botón play/pausa flotante en la esquina inferior derecha, sobre el historial
+                // (Controles-UI-1). El motor solo lo permite si queda por debajo del encabezado del historial.
+                Box(modifier = GlanceModifier.fillMaxSize().padding(widgetPadding), contentAlignment = Alignment.BottomEnd) {
+                    PlayPauseButton(context, info)
+                }
+            }
+        }
+    }
+
+    // Conjunto Controles-UI-1: colores de estado deshabilitado (tokens oficiales de Material 3:
+    // contenedor = onSurface al 10%, contenido = onSurface al 38%).
+    @Composable
+    private fun controlContainerDisabled(context: Context): ColorProvider =
+        ColorProvider(GlanceTheme.colors.onSurface.getColor(context).copy(alpha = 0.10f))
+
+    @Composable
+    private fun controlContentDisabled(context: Context): ColorProvider =
+        ColorProvider(GlanceTheme.colors.onSurface.getColor(context).copy(alpha = 0.38f))
+
+    // Los controles están habilitados solo con una sesión real. Sin sesión quedan atenuados y sin
+    // acción, pero ocupan el mismo espacio: la visibilidad depende del tamaño, nunca del estado.
+    private fun controlsEnabled(info: MusicInfo): Boolean = info.isSessionActive && !info.isEmpty
+
+    @Composable
+    private fun PlaybackControlsRow(context: Context, info: MusicInfo, showProgressBar: Boolean, barWidthDp: Float) {
+        val enabled = controlsEnabled(info)
+        Row(
+            modifier = GlanceModifier.fillMaxWidth().height(CollisionSensor.CONTROLS_ROW_HEIGHT_DP.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (showProgressBar) {
+                ProgressTrack(modifier = GlanceModifier.defaultWeight(), info = info, barWidthDp = barWidthDp)
+                Spacer(GlanceModifier.width(CollisionSensor.CONTROLS_BAR_GAP_DP.dp))
+            } else {
+                Spacer(GlanceModifier.defaultWeight())
+            }
+            PrevNextGroup(context, enabled)
+        }
+    }
+
+    // Barra de progreso (4dp, extremos redondeados; relleno primary sobre pista secondaryContainer:
+    // el par oficial de Material 3). La fracción se calcula al dibujar con el reloj de PlaybackClock.
+    @Composable
+    private fun ProgressTrack(modifier: GlanceModifier, info: MusicInfo, barWidthDp: Float) {
+        val fraction = PlaybackClock.fraction(info.sessionIdentity, info.isPlaying, android.os.SystemClock.elapsedRealtime())
+        val fillDp = if (fraction <= 0f) 0f else (barWidthDp * fraction).coerceAtLeast(4f)
+        Box(
+            modifier = modifier.height(4.dp).background(GlanceTheme.colors.secondaryContainer).cornerRadius(2.dp)
+        ) {
+            if (fillDp > 0f) {
+                Box(
+                    modifier = GlanceModifier.width(fillDp.dp).height(4.dp).background(GlanceTheme.colors.primary).cornerRadius(2.dp)
+                ) {}
+            }
+        }
+    }
+
+    // Grupo conectado anterior/siguiente: una sola píldora tonal con un separador de 2dp entre los
+    // dos botones (esquinas exteriores muy redondas, unión central recta).
+    @Composable
+    private fun PrevNextGroup(context: Context, enabled: Boolean) {
+        val container = if (enabled) GlanceTheme.colors.secondaryContainer else controlContainerDisabled(context)
+        val content = if (enabled) GlanceTheme.colors.onSecondaryContainer else controlContentDisabled(context)
+        val halfWidth = ((CollisionSensor.CONTROLS_GROUP_WIDTH_DP - 2f) / 2f).dp
+        val prevModifier = GlanceModifier.width(halfWidth).fillMaxHeight().let {
+            if (enabled) it.clickable(actionRunCallback<SkipPreviousAction>()) else it
+        }
+        val nextModifier = GlanceModifier.width(halfWidth).fillMaxHeight().let {
+            if (enabled) it.clickable(actionRunCallback<SkipNextAction>()) else it
+        }
+        Row(
+            modifier = GlanceModifier
+                .width(CollisionSensor.CONTROLS_GROUP_WIDTH_DP.dp)
+                .height(CollisionSensor.CONTROLS_ROW_HEIGHT_DP.dp)
+                .background(container)
+                .cornerRadius(100.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(modifier = prevModifier, contentAlignment = Alignment.Center) {
+                Image(
+                    provider = ImageProvider(R.drawable.ic_ctrl_skip_previous_fill_24px),
+                    contentDescription = context.getString(R.string.content_desc_previous),
+                    colorFilter = ColorFilter.tint(content),
+                    modifier = GlanceModifier.size(20.dp)
+                )
+            }
+            Spacer(GlanceModifier.width(2.dp).fillMaxHeight().background(GlanceTheme.colors.widgetBackground))
+            Box(modifier = nextModifier, contentAlignment = Alignment.Center) {
+                Image(
+                    provider = ImageProvider(R.drawable.ic_ctrl_skip_next_fill_24px),
+                    contentDescription = context.getString(R.string.content_desc_next),
+                    colorFilter = ColorFilter.tint(content),
+                    modifier = GlanceModifier.size(20.dp)
+                )
+            }
+        }
+    }
+
+    // Botón principal play/pausa (Filled: primary / onPrimary). La forma comunica el estado sin
+    // animación: pausado (ícono play) = píldora completa; reproduciendo (ícono pausa) = rectángulo
+    // de esquinas redondeadas.
+    @Composable
+    private fun PlayPauseButton(context: Context, info: MusicInfo) {
+        val enabled = controlsEnabled(info)
+        val showsPause = info.isPlaying || info.isBuffering
+        val container = if (enabled) GlanceTheme.colors.primary else controlContainerDisabled(context)
+        val content = if (enabled) GlanceTheme.colors.onPrimary else controlContentDisabled(context)
+        val radius = if (showsPause) 16.dp else 100.dp
+        val buttonModifier = GlanceModifier
+            .width(CollisionSensor.PLAY_BUTTON_WIDTH_DP.dp)
+            .height(CollisionSensor.PLAY_BUTTON_HEIGHT_DP.dp)
+            .background(container)
+            .cornerRadius(radius)
+            .let { if (enabled) it.clickable(actionRunCallback<PlayPauseAction>()) else it }
+        Box(modifier = buttonModifier, contentAlignment = Alignment.Center) {
+            Image(
+                provider = ImageProvider(if (showsPause) R.drawable.ic_ctrl_pause_fill_24px else R.drawable.ic_ctrl_play_fill_24px),
+                contentDescription = context.getString(if (showsPause) R.string.content_desc_pause else R.string.content_desc_play),
+                colorFilter = ColorFilter.tint(content),
+                modifier = GlanceModifier.size(24.dp)
+            )
         }
     }
 

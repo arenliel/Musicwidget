@@ -26,6 +26,10 @@
     <string name="content_desc_app_icon">Icono de la aplicación</string>
     <string name="content_desc_clear_history">Limpiar historial</string>
     <string name="content_desc_open_song">Abrir canción</string>
+    <string name="content_desc_play">Reproducir</string>
+    <string name="content_desc_pause">Pausar</string>
+    <string name="content_desc_previous">Canción anterior</string>
+    <string name="content_desc_next">Siguiente canción</string>
     <string name="content_desc_no_artwork">Sin portada</string>
     <string name="content_desc_notifications_permission">Permiso de notificaciones</string>
     <string name="content_desc_battery_permission">Permiso de batería</string>
