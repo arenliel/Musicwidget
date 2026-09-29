@@ -12,6 +12,7 @@ import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -443,6 +444,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
             textColumnWidthDp = textColumnWidthDp
         )
 
+        // Conjunto Ajustes-Umbral-1: traza de diagnóstico de la decisión de controles. Sirve para leer en el
+        // registro interno el alto REAL que Android entrega al widget (p. ej. 2 celdas) y calibrar el umbral.
+        InternalLogger.d(context, "[CTRL_TRACE] Layout4x4: alto=${size.height.value}dp ancho=${size.width.value}dp pildora=${pillSize.value}dp fontScale=$fontScale controles=${controls.showControls} lineas=${controls.artistLines} barra=${controls.showProgressBar}")
+
         Box(modifier = GlanceModifier.fillMaxSize()) {
             Column(modifier = GlanceModifier.fillMaxSize().padding(widgetPadding)) {
                 // Refactorizado para anclaje inferior de metadatos (v1.5.3)
@@ -498,7 +503,15 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     Spacer(GlanceModifier.size(16.dp))
                     // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
                     Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
-                        HistoryList(context, info.history, info.sessionIdentity)
+                        // Conjunto Ajustes-Umbral-1: entre el alto mínimo de los controles y 238dp (píldora máxima) el
+                        // botón play flotante queda sobre el encabezado del historial. Se reserva su ancho (+8dp de aire)
+                        // al final del encabezado para que el botón de limpiar historial siga visible y tocable.
+                        val fabOverHistoryHeader = controls.showControls &&
+                            CollisionSensor.fabOverlapsHistoryHeader(size.height.value, pillSize.value)
+                        HistoryList(
+                            context, info.history, info.sessionIdentity,
+                            headerEndReserve = if (fabOverHistoryHeader) (CollisionSensor.PLAY_BUTTON_WIDTH_DP + 8f).dp else 0.dp
+                        )
 
                         // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
                         Box(
@@ -520,15 +533,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         }
     }
 
-    // Conjunto Controles-UI-1: colores de estado deshabilitado (tokens oficiales de Material 3:
-    // contenedor = onSurface al 10%, contenido = onSurface al 38%).
-    @Composable
-    private fun controlContainerDisabled(context: Context): ColorProvider =
-        ColorProvider(GlanceTheme.colors.onSurface.getColor(context).copy(alpha = 0.10f))
-
-    @Composable
-    private fun controlContentDisabled(context: Context): ColorProvider =
-        ColorProvider(GlanceTheme.colors.onSurface.getColor(context).copy(alpha = 0.38f))
+    // Conjunto Ajustes-Deshabilitado-1: el estado deshabilitado (sin sesión) ya NO usa opacidad. Usa tonos
+    // sólidos de la paleta adaptativa (siguen el fondo y el modo claro/oscuro): el botón play pasa de
+    // "relleno primary" a "contorno outline sobre widgetBackground" (relleno → hueco), y el grupo prev/next
+    // pasa de secondaryContainer/onSecondaryContainer a surfaceVariant/outline (neutro, sin acento).
 
     // Los controles están habilitados solo con una sesión real. Sin sesión quedan atenuados y sin
     // acción, pero ocupan el mismo espacio: la visibilidad depende del tamaño, nunca del estado.
@@ -542,7 +550,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (showProgressBar) {
-                ProgressTrack(modifier = GlanceModifier.defaultWeight(), info = info, barWidthDp = barWidthDp)
+                ProgressTrack(context = context, modifier = GlanceModifier.defaultWeight(), info = info, barWidthDp = barWidthDp, enabled = enabled)
                 Spacer(GlanceModifier.width(CollisionSensor.CONTROLS_BAR_GAP_DP.dp))
             } else {
                 Spacer(GlanceModifier.defaultWeight())
@@ -551,29 +559,32 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         }
     }
 
-    // Barra de progreso (4dp, extremos redondeados; relleno primary sobre pista secondaryContainer:
-    // el par oficial de Material 3). La fracción se calcula al dibujar con el reloj de PlaybackClock.
+    // Conjunto Ajustes-BarraOnda-1: barra de progreso ondulada (Material 3 Expressive): reproduciendo = onda
+    // en el tramo recorrido; en pausa = línea recta. Pista recta con un punto final (stop indicator).
+    // Glance no tiene lienzo ni animación, así que se dibuja como un Bitmap del ancho exacto de la barra
+    // (WavyProgressRenderer, con caché) y se refresca con el mismo tick de 15 s de PlaybackClock.
+    // Sin sesión (deshabilitado): sin tramo recorrido y colores neutros (surfaceVariant / outline).
     @Composable
-    private fun ProgressTrack(modifier: GlanceModifier, info: MusicInfo, barWidthDp: Float) {
-        val fraction = PlaybackClock.fraction(info.sessionIdentity, info.isPlaying, android.os.SystemClock.elapsedRealtime())
-        val fillDp = if (fraction <= 0f) 0f else (barWidthDp * fraction).coerceAtLeast(4f)
-        Box(
-            modifier = modifier.height(4.dp).background(GlanceTheme.colors.secondaryContainer).cornerRadius(2.dp)
-        ) {
-            if (fillDp > 0f) {
-                Box(
-                    modifier = GlanceModifier.width(fillDp.dp).height(4.dp).background(GlanceTheme.colors.primary).cornerRadius(2.dp)
-                ) {}
-            }
-        }
+    private fun ProgressTrack(context: Context, modifier: GlanceModifier, info: MusicInfo, barWidthDp: Float, enabled: Boolean) {
+        val fraction = if (enabled) PlaybackClock.fraction(info.sessionIdentity, info.isPlaying, android.os.SystemClock.elapsedRealtime()) else 0f
+        val activeColor = GlanceTheme.colors.primary.getColor(context).toArgb()
+        val trackColor = (if (enabled) GlanceTheme.colors.secondaryContainer else GlanceTheme.colors.surfaceVariant).getColor(context).toArgb()
+        val stopColor = (if (enabled) GlanceTheme.colors.primary else GlanceTheme.colors.outline).getColor(context).toArgb()
+        val bitmap = WavyProgressRenderer.render(context, barWidthDp, fraction, enabled && info.isPlaying, activeColor, trackColor, stopColor)
+        Image(
+            provider = ImageProvider(bitmap),
+            contentDescription = null,
+            contentScale = ContentScale.FillBounds,
+            modifier = modifier.height(WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp)
+        )
     }
 
     // Grupo conectado anterior/siguiente: una sola píldora tonal con un separador de 2dp entre los
     // dos botones (esquinas exteriores muy redondas, unión central recta).
     @Composable
     private fun PrevNextGroup(context: Context, enabled: Boolean) {
-        val container = if (enabled) GlanceTheme.colors.secondaryContainer else controlContainerDisabled(context)
-        val content = if (enabled) GlanceTheme.colors.onSecondaryContainer else controlContentDisabled(context)
+        val container = if (enabled) GlanceTheme.colors.secondaryContainer else GlanceTheme.colors.surfaceVariant
+        val content = if (enabled) GlanceTheme.colors.onSecondaryContainer else GlanceTheme.colors.outline
         val halfWidth = ((CollisionSensor.CONTROLS_GROUP_WIDTH_DP - 2f) / 2f).dp
         val prevModifier = GlanceModifier.width(halfWidth).fillMaxHeight().let {
             if (enabled) it.clickable(actionRunCallback<SkipPreviousAction>()) else it
@@ -616,22 +627,52 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     private fun PlayPauseButton(context: Context, info: MusicInfo) {
         val enabled = controlsEnabled(info)
         val showsPause = info.isPlaying || info.isBuffering
-        val container = if (enabled) GlanceTheme.colors.primary else controlContainerDisabled(context)
-        val content = if (enabled) GlanceTheme.colors.onPrimary else controlContentDisabled(context)
         val radius = if (showsPause) 16.dp else 100.dp
-        val buttonModifier = GlanceModifier
-            .width(CollisionSensor.PLAY_BUTTON_WIDTH_DP.dp)
-            .height(CollisionSensor.PLAY_BUTTON_HEIGHT_DP.dp)
-            .background(container)
-            .cornerRadius(radius)
-            .let { if (enabled) it.clickable(actionRunCallback<PlayPauseAction>()) else it }
-        Box(modifier = buttonModifier, contentAlignment = Alignment.Center) {
-            Image(
-                provider = ImageProvider(if (showsPause) R.drawable.ic_ctrl_pause_fill_24px else R.drawable.ic_ctrl_play_fill_24px),
-                contentDescription = context.getString(if (showsPause) R.string.content_desc_pause else R.string.content_desc_play),
-                colorFilter = ColorFilter.tint(content),
-                modifier = GlanceModifier.size(24.dp)
-            )
+        val iconRes = if (showsPause) R.drawable.ic_ctrl_pause_fill_24px else R.drawable.ic_ctrl_play_fill_24px
+        val description = context.getString(if (showsPause) R.string.content_desc_pause else R.string.content_desc_play)
+        if (enabled) {
+            val buttonModifier = GlanceModifier
+                .width(CollisionSensor.PLAY_BUTTON_WIDTH_DP.dp)
+                .height(CollisionSensor.PLAY_BUTTON_HEIGHT_DP.dp)
+                .background(GlanceTheme.colors.primary)
+                .cornerRadius(radius)
+                .clickable(actionRunCallback<PlayPauseAction>())
+            Box(modifier = buttonModifier, contentAlignment = Alignment.Center) {
+                Image(
+                    provider = ImageProvider(iconRes),
+                    contentDescription = description,
+                    colorFilter = ColorFilter.tint(GlanceTheme.colors.onPrimary),
+                    modifier = GlanceModifier.size(24.dp)
+                )
+            }
+        } else {
+            // Deshabilitado: contorno de 1.5dp (`outline`) con el interior del color del fondo del widget.
+            // Mismo tamaño y forma que el botón activo (no cambia el espacio) y sin acción al tocar.
+            val ring = 1.5.dp
+            Box(
+                modifier = GlanceModifier
+                    .width(CollisionSensor.PLAY_BUTTON_WIDTH_DP.dp)
+                    .height(CollisionSensor.PLAY_BUTTON_HEIGHT_DP.dp)
+                    .background(GlanceTheme.colors.outline)
+                    .cornerRadius(radius)
+                    .padding(ring),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = GlanceModifier
+                        .fillMaxSize()
+                        .background(GlanceTheme.colors.widgetBackground)
+                        .cornerRadius(radius - ring),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        provider = ImageProvider(iconRes),
+                        contentDescription = description,
+                        colorFilter = ColorFilter.tint(GlanceTheme.colors.outline),
+                        modifier = GlanceModifier.size(24.dp)
+                    )
+                }
+            }
         }
     }
 
@@ -648,7 +689,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     }
 
     @Composable
-    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String) {
+    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String, headerEndReserve: Dp = 0.dp) {
         val historyHeaderTextSize = spDimen(R.dimen.text_size_history_header)
         val historyHeaderIconSize = dimen(R.dimen.history_header_icon_size)
         
@@ -666,7 +707,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         } else filteredHistory
 
         Column(modifier = GlanceModifier.fillMaxSize()) {
-            Row(modifier = GlanceModifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = GlanceModifier.fillMaxWidth().padding(bottom = 8.dp, end = headerEndReserve), verticalAlignment = Alignment.CenterVertically) {
                 Text(text = context.getString(R.string.history_header), style = TextStyle(fontSize = historyHeaderTextSize, fontWeight = FontWeight.Bold, color = GlanceTheme.colors.primary), modifier = GlanceModifier.defaultWeight())
                 if (history.isNotEmpty()) {
                     Image(provider = ImageProvider(R.drawable.clear_all_24px), contentDescription = context.getString(R.string.content_desc_clear_history), colorFilter = ColorFilter.tint(GlanceTheme.colors.onSurfaceVariant), modifier = GlanceModifier.size(historyHeaderIconSize).clickable(actionRunCallback<ClearHistoryAction>()))
@@ -823,10 +864,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val fontScale = context.resources.configuration.fontScale
         
         // Sensor de Estrés Local para Full-Bleed (Choque con DeviceIconTonal)
-        val tSizeSp = 16f; val aSizeSp = 12f; val sSizeSp = 10f
-        val lineHeight = 1.3f
+        // Conjunto Ajustes-Texto-1: la altura del texto sale del motor (CollisionSensor.textStackHeightDp),
+        // misma fuente de verdad que evaluate() y evaluateControls(); aquí ya no se duplican tamaños.
         val deviceIconH = 24f 
-        val textHeightWithLabel = ((tSizeSp + aSizeSp + sSizeSp) * fontScale * lineHeight) + 6f
+        val textHeightWithLabel = CollisionSensor.textStackHeightDp(fontScale, withStatus = true, artistLines = 1)
         val paddingTotal = widgetPadding.value * 2
         
         val showStatusLabel = size.height.value >= (textHeightWithLabel + deviceIconH + paddingTotal)
@@ -921,7 +962,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 // 1. PlaybackStatusIndicator (Supresión en estado vacío)
                 if (isStatusLabelVisible && !info.isEmpty) { 
                     PlaybackStatusIndicator(info, context, overlineEndReserve)
-                    Spacer(GlanceModifier.size(4.dp)) 
+                    Spacer(GlanceModifier.size(CollisionSensor.OVERLINE_TITLE_GAP_DP.dp))
                 }
                 
                 // 2. Row con icono de la app y Título de la canción
@@ -940,8 +981,11 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 }
             }
             
-            if (part == TextPart.ALL) {
-                Spacer(GlanceModifier.size(2.dp))
+            // Conjunto Ajustes-Texto-1: separación título→artista/letra (6dp; antes 2dp y solo en ALL). Se dibuja
+            // también al inicio del segmento BOTTOM, porque con controles (y en la rama con "ecuador") el
+            // título y el artista viven en segmentos distintos. El motor la cuenta en artistBlockHeightDp().
+            if (part == TextPart.ALL || part == TextPart.BOTTOM) {
+                Spacer(GlanceModifier.size(CollisionSensor.TITLE_ARTIST_GAP_DP.dp))
             }
             
             if (part == TextPart.ALL || part == TextPart.BOTTOM) {

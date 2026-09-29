@@ -8,7 +8,7 @@
     <dimen name="icon_size_small">14dp</dimen>
     <dimen name="icon_size_medium">16dp</dimen>
     <dimen name="icon_size_large">24dp</dimen>
-    <dimen name="text_size_title">16sp</dimen>
+    <dimen name="text_size_title">14sp</dimen>
     <dimen name="text_size_artist">12sp</dimen>
     <dimen name="text_size_status">10sp</dimen>
     <dimen name="text_size_history_item_title">13sp</dimen>

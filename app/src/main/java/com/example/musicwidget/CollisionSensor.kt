@@ -26,24 +26,29 @@ data class ControlsResult(
 
 object CollisionSensor {
 
-    // Conjunto Controles-Motor-1: constantes tipográficas ahora compartidas (SSOT) entre evaluate()
-    // y evaluateControls(). Mismos valores que tenían como locales dentro de evaluate().
-    private const val TITLE_SIZE_SP = 16f
-    private const val ARTIST_SIZE_SP = 12f
-    private const val STATUS_SIZE_SP = 10f
-    private const val LINE_HEIGHT_FACTOR = 1.3f
-    private const val TOP_BLOCK_SPACER_DP = 4f      // Spacer entre "overline" y título dentro de TextInfo
+    // Conjunto Ajustes-Motor-1: escala tipográfica y separaciones (SSOT). Son públicas para que la UI
+    // (TextInfo, Layout2x1) las consuma en vez de duplicarlas: el motor y lo que se dibuja no pueden divergir.
+    //  - Título 14sp (Title Small de Material 3); antes 16sp.
+    //  - Estado (overline) 10sp: sin cambios.
+    //  - Separación estado→título 2dp: forman UN solo encabezado (principio de proximidad).
+    //  - Separación título→artista/letra 6dp: el contenido de apoyo/dinámico queda como grupo aparte.
+    const val TITLE_SIZE_SP = 14f
+    const val ARTIST_SIZE_SP = 12f
+    const val STATUS_SIZE_SP = 10f
+    const val LINE_HEIGHT_FACTOR = 1.3f
+    const val OVERLINE_TITLE_GAP_DP = 2f
+    const val TITLE_ARTIST_GAP_DP = 6f
 
     // Conjunto Controles-Motor-1: geometría de los controles (Layout4x4).
     const val CONTROLS_ROW_HEIGHT_DP = 32f          // Alto de la fila prev/next + barra
     const val CONTROLS_GAP_DP = 4f                  // Separación mínima texto de artista ↔ fila de controles
     const val CONTROLS_GROUP_WIDTH_DP = 74f         // Píldora prev/next: 2 × 36dp + 2dp de separador
-    const val CONTROLS_BAR_GAP_DP = 8f              // Separación barra ↔ grupo prev/next
+    const val CONTROLS_BAR_GAP_DP = 12f             // Separación barra ↔ grupo prev/next (Ajustes: 12dp = misma separación que hay entre la portada y la columna de texto)
     const val CONTROLS_BAR_MIN_WIDTH_DP = 40f       // Ancho mínimo para que la barra se muestre
     const val PLAY_BUTTON_WIDTH_DP = 64f
     const val PLAY_BUTTON_HEIGHT_DP = 48f
     private const val PLAY_BUTTON_CLEARANCE_DP = 2f // Aire entre el botón play y el encabezado del historial
-    private const val WIDGET_PADDING_TOTAL_DP = 34f // 17dp arriba + 17dp abajo (R.dimen.widget_padding × 2)
+    const val WIDGET_PADDING_TOTAL_DP = 34f     // 17dp arriba + 17dp abajo (R.dimen.widget_padding × 2); una prueba verifica la paridad con dimens.xml
     private const val HISTORY_SPACER_DP = 16f       // Spacer entre la fila de píldora y el historial
     private const val HISTORY_HEADER_DP = 28f       // Encabezado del historial: ícono 20dp + 8dp de padding inferior
 
@@ -72,8 +77,8 @@ object CollisionSensor {
         val tSizeSp = TITLE_SIZE_SP
         val aSizeSp = ARTIST_SIZE_SP
         val sSizeSp = STATUS_SIZE_SP
-        val spacersH = 6f
-        val paddingH = 34f
+        val spacersH = OVERLINE_TITLE_GAP_DP + TITLE_ARTIST_GAP_DP
+        val paddingH = WIDGET_PADDING_TOTAL_DP
         val safetyGap = 12f
         val lineHeight = LINE_HEIGHT_FACTOR
 
@@ -113,23 +118,53 @@ object CollisionSensor {
     }
 
     /**
-     * Conjunto Controles-Motor-1: alto (dp) del bloque superior de texto (overline + título).
+     * Conjunto Controles-Motor-1 / Ajustes-Motor-1: alto (dp) del bloque superior de texto (overline + título).
      * Es el "ecuador visual" fijo: no depende del contenido, solo del fontScale.
      */
     fun topBlockHeightDp(fontScale: Float): Float =
-        ((STATUS_SIZE_SP + TITLE_SIZE_SP) * fontScale * LINE_HEIGHT_FACTOR) + TOP_BLOCK_SPACER_DP
+        ((STATUS_SIZE_SP + TITLE_SIZE_SP) * fontScale * LINE_HEIGHT_FACTOR) + OVERLINE_TITLE_GAP_DP
 
-    /** Conjunto Controles-Motor-1: alto (dp) reservado para el texto de artista/letra con [lines] líneas. */
+    /**
+     * Conjunto Ajustes-Motor-1: alto (dp) reservado para el texto de artista/letra con [lines] líneas.
+     * Incluye la separación título→artista ([TITLE_ARTIST_GAP_DP]), que TextInfo dibuja al inicio del
+     * segmento BOTTOM.
+     */
     fun artistBlockHeightDp(fontScale: Float, lines: Int): Float =
-        ARTIST_SIZE_SP * fontScale * LINE_HEIGHT_FACTOR * lines
+        TITLE_ARTIST_GAP_DP + ARTIST_SIZE_SP * fontScale * LINE_HEIGHT_FACTOR * lines
+
+    /**
+     * Conjunto Ajustes-Motor-1: alto (dp) de la pila completa de texto (TextInfo en modo ALL).
+     * [withStatus] = false quita el overline y su separación. Fuente única para Layout2x1.
+     */
+    fun textStackHeightDp(fontScale: Float, withStatus: Boolean, artistLines: Int): Float {
+        val statusH = if (withStatus) STATUS_SIZE_SP * fontScale * LINE_HEIGHT_FACTOR + OVERLINE_TITLE_GAP_DP else 0f
+        return statusH + TITLE_SIZE_SP * fontScale * LINE_HEIGHT_FACTOR + artistBlockHeightDp(fontScale, artistLines)
+    }
+
+    /**
+     * Conjunto Ajustes-Motor-1: alto mínimo del widget para que el botón play/pausa (flotante, esquina
+     * inferior derecha) NO se solape con la fila de controles prev/next + barra, que termina a
+     * padding + [pillSizeDp] desde arriba. Criterio: el botón nunca puede tapar controles.
+     */
+    fun minWidgetHeightForControlsDp(pillSizeDp: Float): Float =
+        WIDGET_PADDING_TOTAL_DP + pillSizeDp + CONTROLS_GAP_DP + PLAY_BUTTON_HEIGHT_DP
+
+    /**
+     * Conjunto Ajustes-Motor-1: `true` si el botón play/pausa queda sobre el encabezado del historial
+     * (su botón de limpiar quedaría tapado). La UI reserva entonces ancho al final del encabezado.
+     */
+    fun fabOverlapsHistoryHeader(widgetHeightDp: Float, pillSizeDp: Float): Boolean =
+        widgetHeightDp < WIDGET_PADDING_TOTAL_DP + pillSizeDp + HISTORY_SPACER_DP + HISTORY_HEADER_DP +
+            PLAY_BUTTON_HEIGHT_DP + PLAY_BUTTON_CLEARANCE_DP
 
     /**
      * Conjunto Controles-Motor-1: decide si Layout4x4 muestra los controles de reproducción.
      *
      * Reglas (todo o nada — nunca se muestra un subconjunto de los botones):
-     *  1. El botón play/pausa flota sobre el historial: solo se muestra si el widget es lo bastante
-     *     alto para que quede POR DEBAJO del encabezado del historial (no debe tapar su botón de
-     *     limpiar historial).
+     *  1. El botón play/pausa flota en la esquina inferior derecha: solo se muestra si el widget es lo
+     *     bastante alto para que NO se solape con la fila de controles prev/next + barra
+     *     ([minWidgetHeightForControlsDp]). Puede quedar sobre el encabezado del historial: eso lo
+     *     resuelve la UI reservando ancho ([fabOverlapsHistoryHeader]), no ocultando los controles.
      *  2. Bloque superior + texto de artista + separación + fila de controles deben caber en la
      *     altura de la píldora. Se intenta con las líneas de artista que decidió evaluate(); si no
      *     caben y eran 2, se baja a 1; si con 1 tampoco caben, no se muestran controles.
@@ -145,10 +180,7 @@ object CollisionSensor {
         sensorMaxArtistLines: Int,
         textColumnWidthDp: Float
     ): ControlsResult {
-        val minWidgetHeightForPlayButton =
-            WIDGET_PADDING_TOTAL_DP + pillSizeDp + HISTORY_SPACER_DP + HISTORY_HEADER_DP +
-                PLAY_BUTTON_HEIGHT_DP + PLAY_BUTTON_CLEARANCE_DP
-        if (widgetHeightDp < minWidgetHeightForPlayButton) {
+        if (widgetHeightDp < minWidgetHeightForControlsDp(pillSizeDp)) {
             return ControlsResult(showControls = false, artistLines = sensorMaxArtistLines, showProgressBar = false)
         }
 
