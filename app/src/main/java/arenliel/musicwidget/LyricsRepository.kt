@@ -17,6 +17,25 @@ data class LyricsResult(val trackKey: String, val allEntries: List<LyricsEntry>)
 class LyricsRepository(private val context: Context) {
     private val lyricsDao = LyricsDatabase.getDatabase(context).lyricsDao()
 
+    companion object {
+        // TTL 1h para re-intentos tras un "no encontrado" (ya existía; extraído a
+        // constante nombrada en Letras-Atomicas-13, sin cambio de valor ni de comportamiento).
+        private const val NOT_FOUND_TTL_MS = 1 * 60 * 60 * 1000L
+
+        // Conjunto Letras-Atomicas-13: TTL de 30 días para contenido "encontrado".
+        // Antes de este conjunto no existía ningún límite — una entrada corrupta,
+        // sin importar su origen, se servía para siempre. Con este límite, cualquier
+        // entrada tiene una ventana acotada tras la cual el sistema vuelve a
+        // consultar la fuente externa en vez de perpetuar el contenido guardado.
+        private const val FOUND_TTL_MS = 30L * 24 * 60 * 60 * 1000L
+
+        // Conjunto Letras-Atomicas-13: un resultado con menos líneas cronometradas
+        // que este umbral no se acepta como letra sincronizada completa de una
+        // canción real. El umbral es deliberadamente bajo: solo necesita distinguir
+        // "esto no es una letra completa" de "esto sí lo es".
+        private const val MIN_PLAUSIBLE_TIMED_LINES = 3
+    }
+
     suspend fun getLyrics(trackKey: String, artist: String, title: String, durationMs: Long): LyricsResult? = withContext(Dispatchers.IO) {
         // 1. Intentar desde Room
         val cached = lyricsDao.getLyrics(trackKey)
@@ -24,17 +43,24 @@ class LyricsRepository(private val context: Context) {
             val now = System.currentTimeMillis()
             if (cached.notFound) {
                 // TTL 1h para re-intentos de letras (v3.0)
-                if (now - cached.timestampFetched < 1 * 60 * 60 * 1000L) {
+                if (now - cached.timestampFetched < NOT_FOUND_TTL_MS) {
                     android.util.Log.d("LYRICS_RETRY_TRACE", "TTL bloqueando reintento: trackKey=$trackKey, msDesdeUltimoIntento=${now - cached.timestampFetched}")
                     return@withContext null
                 }
             } else {
-                lyricsDao.updateLastAccessed(trackKey, now)
-                return@withContext parseStoredLyrics(trackKey, cached.syncedLyrics ?: "", durationMs)
+                // Conjunto Letras-Atomicas-13: una entrada "encontrada" ya no se sirve
+                // indefinidamente. Si supera su ventana de vigencia, se trata como
+                // vencida y cae al mismo camino de re-consulta a red de más abajo, en
+                // vez de perpetuar un contenido potencialmente incorrecto para siempre.
+                if (now - cached.timestampFetched < FOUND_TTL_MS) {
+                    lyricsDao.updateLastAccessed(trackKey, now)
+                    return@withContext parseStoredLyrics(trackKey, cached.syncedLyrics ?: "", durationMs)
+                }
+                android.util.Log.d("LYRICS_RETRY_TRACE", "TTL de contenido vencido, re-consultando: trackKey=$trackKey, msDesdeUltimoFetch=${now - cached.timestampFetched}")
             }
         }
 
-        // 2. Si no hay o TTL expiró, ir a red
+        // 2. Si no hay, TTL expiró, o el contenido "encontrado" venció, ir a red
         // Conjunto Letras-Atomicas-12: sin duración confirmada, la consulta a LRCLIB queda
         // ambigua entre distintas versiones/ediciones con el mismo título y artista, cada
         // una con su propia sincronización. En vez de arriesgar una coincidencia ambigua,
@@ -84,6 +110,42 @@ class LyricsRepository(private val context: Context) {
         return text.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "").trim()
     }
 
+    // Conjunto Letras-Atomicas-13: cuenta cuántas líneas de un bloque LRC tienen un
+    // timestamp válido (`[mm:ss.xx]`). Es la señal de forma usada por
+    // `isPlausibleLyrics` — independiente de qué diga el texto, mide si el bloque
+    // tiene la extensión mínima que tendría una letra sincronizada real.
+    private fun countTimestampedLines(lrc: String): Int {
+        val regex = Regex("\\[(\\d{2}):(\\d{2})\\.(\\d{2,3})\\]")
+        return lrc.lines().count { regex.containsMatchIn(it) }
+    }
+
+    // Conjunto Letras-Atomicas-13: filtro de plausibilidad de contenido. Se usa
+    // tanto en la ingesta de resultados nuevos (`fetchFromNetwork`) como en el
+    // saneamiento retroactivo (`purgeImplausibleCachedEntries`), para que ambos
+    // apliquen exactamente el mismo criterio.
+    private fun isPlausibleLyrics(lrc: String): Boolean {
+        return countTimestampedLines(lrc) >= MIN_PLAUSIBLE_TIMED_LINES
+    }
+
+    /**
+     * Conjunto Letras-Atomicas-13: saneamiento retroactivo. Recorre las entradas
+     * "encontradas" ya persistidas y purga (mediante `deleteLyrics`, ya declarado
+     * en el DAO pero sin uso hasta ahora) las que no superan el mismo filtro de
+     * plausibilidad aplicado desde ahora a las consultas nuevas — cierra la brecha
+     * para contenido que ya estaba cacheado antes de esta corrección. Segura de
+     * ejecutar en cada arranque del servicio: si no hay nada que purgar, no hace nada.
+     */
+    suspend fun purgeImplausibleCachedEntries() = withContext(Dispatchers.IO) {
+        val foundEntries = lyricsDao.getAllFoundLyrics()
+        for (entry in foundEntries) {
+            val lrc = entry.syncedLyrics
+            if (lrc == null || !isPlausibleLyrics(lrc)) {
+                android.util.Log.d("LYRICS_RETRY_TRACE", "Saneamiento: purgando entrada implausible cacheada, trackKey=${entry.trackKey}")
+                lyricsDao.deleteLyrics(entry.trackKey)
+            }
+        }
+    }
+
     private suspend fun fetchFromNetwork(artist: String, title: String, durationSec: Long): String? = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
@@ -113,7 +175,16 @@ class LyricsRepository(private val context: Context) {
                     Log.e("LyricsRepo", "Respuesta de LRCLIB no coincide con lo solicitado: pedido=$artist|$title, recibido=$returnedArtist|$returnedTrack")
                     return@withContext null
                 }
-                return@withContext json.optString("syncedLyrics").takeIf { it.isNotBlank() }
+                // Conjunto Letras-Atomicas-13: metadatos correctos no garantizan
+                // contenido plausible — un bloque con muy pocas líneas cronometradas
+                // no es una letra sincronizada completa, aunque venga con la
+                // identidad correcta. Se descarta aquí, antes de persistirse.
+                val syncedLyrics = json.optString("syncedLyrics").takeIf { it.isNotBlank() }
+                if (syncedLyrics != null && !isPlausibleLyrics(syncedLyrics)) {
+                    Log.e("LyricsRepo", "Contenido descartado por implausible (menos de $MIN_PLAUSIBLE_TIMED_LINES líneas cronometradas): artista=$artist, título=$title")
+                    return@withContext null
+                }
+                return@withContext syncedLyrics
             }
         } catch (e: Exception) {
             Log.e("LyricsRepo", "Error fetching lyrics", e)

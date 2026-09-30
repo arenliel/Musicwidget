@@ -434,12 +434,15 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
-    // Conjunto Controles-Posicion-1: mantiene vivo, solo mientras hace falta, un refresco barato de
-    // la barra de progreso. Condiciones para seguir vivo en cada vuelta: pantalla encendida y
-    // desbloqueada (misma compuerta que el resto del servicio), reproduciendo, y al menos un
-    // widget Control colocado. Si alguna falla, el ticker se detiene solo y se relanza en el
-    // siguiente snapshot procesado o al desbloquear. Solo redibuja el widget Control (no los otros
-    // dos tipos) y pasa por el mismo mutex de Glance que el resto de actualizaciones.
+    // Conjunto Controles-Posicion-1 + Reconciliación-Estado-Reproducción-1: mantiene vivo, solo
+    // mientras hace falta, un ciclo de 15s con dos responsabilidades independientes en cada
+    // vuelta: (1) reconciliación activa de estado real — universal, no depende del tipo de
+    // widget colocado, corrige el caso en que la app fuente deja de notificar cambios de
+    // estado/posición (pausa, seek) sin avisar; (2) redibujado cosmético barato de la barra de
+    // progreso del widget Control, si lo hay. Condiciones para seguir vivo en cada vuelta:
+    // pantalla encendida y desbloqueada (misma compuerta que el resto del servicio) y
+    // reproduciendo. Si alguna falla, el ticker se detiene solo y se relanza en el siguiente
+    // snapshot procesado o al desbloquear.
     // isPlayingHint: el snapshot que se acaba de procesar puede llegar antes de que la RAM lo refleje.
     private fun ensureProgressTicker(isPlayingHint: Boolean = false) {
         if (progressTickJob?.isActive == true) return
@@ -447,14 +450,48 @@ class MusicNotificationListener : NotificationListenerService() {
         progressTickJob = serviceScope.launch {
             while (isActive) {
                 delay(PROGRESS_TICK_MS)
-                if (!isWidgetPotentiallyVisible() || !MusicStateProvider.current().isPlaying) break
+                if (!isWidgetPotentiallyVisible()) {
+                    InternalLogger.d(applicationContext, "[RECONCILE_TRACE] Ticker detenido: pantalla no visible.")
+                    break
+                }
+                if (!MusicStateProvider.current().isPlaying) {
+                    InternalLogger.d(applicationContext, "[RECONCILE_TRACE] Ticker detenido: ya no hay reproducción en curso.")
+                    break
+                }
+
+                // Conjunto Reconciliación-Estado-Reproducción-1: lectura en vivo del controlador
+                // seleccionado — una llamada Binder fresca, NO la última callback recibida. Si la
+                // app fuente actualizó su PlaybackState pero la notificación de ese cambio nunca
+                // nos llegó (confirmado en campo: cero callbacks durante minutos de pausa real),
+                // esta lectura sí ve el valor real. Solo se dispara un refresco completo si hay
+                // una divergencia genuina — no en cada vuelta — para no convertir esto en un
+                // refresco incondicional cada 15s durante toda reproducción sana.
+                val liveController = selectedController
+                val lastSnapshot = lastAppliedSnapshot
+                if (liveController != null && lastSnapshot != null && lastSnapshot.packageName == liveController.packageName) {
+                    val liveState = runCatching { liveController.playbackState }.getOrNull()
+                    if (liveState != null) {
+                        val stateDiverged = liveState.state != lastSnapshot.playbackState
+                        val expectedPos = lastSnapshot.projectedPositionMs()
+                        val actualPos = liveState.position
+                        val positionDiverged = Math.abs(expectedPos - actualPos) > RECONCILE_POSITION_TOLERANCE_MS
+                        if (stateDiverged || positionDiverged) {
+                            InternalLogger.d(applicationContext, "[RECONCILE_TRACE] Divergencia detectada: estadoWidget=${lastSnapshot.playbackState}, estadoReal=${liveState.state}, posEsperada=${expectedPos}ms, posReal=${actualPos}ms")
+                            requestRefresh(fast = true, reason = "reconciliation_poll")
+                        }
+                    }
+                }
+
                 val hasControlWidget = runCatching {
                     GlanceAppWidgetManager(applicationContext).getGlanceIds(LargeMusicWidget::class.java).isNotEmpty()
                 }.getOrDefault(false)
-                if (!hasControlWidget) break
-                InternalLogger.d(applicationContext, "[PROGRESS_TRACE] tick: refrescando widget Control")
-                MusicWidget.withGlanceUpdateLock {
-                    runCatching { WidgetAppearance.PILL_CONTROL.updateAll(applicationContext) }
+                if (hasControlWidget) {
+                    InternalLogger.d(applicationContext, "[PROGRESS_TRACE] tick: refrescando widget Control")
+                    MusicWidget.withGlanceUpdateLock {
+                        runCatching { WidgetAppearance.PILL_CONTROL.updateAll(applicationContext) }
+                    }
+                } else {
+                    InternalLogger.d(applicationContext, "[PROGRESS_TRACE] tick: sin widget Control colocado, se omite redibujado (la reconciliación de arriba sigue activa).")
                 }
             }
         }
@@ -671,6 +708,14 @@ class MusicNotificationListener : NotificationListenerService() {
             )
 
         lyricsRepository = LyricsRepository(applicationContext)
+
+        // Conjunto Letras-Atomicas-13: saneamiento retroactivo de una sola vez por
+        // arranque de servicio — purga cualquier entrada "encontrada" ya persistida
+        // que no supere el filtro de plausibilidad de contenido. Ver
+        // LyricsRepository.purgeImplausibleCachedEntries() para el detalle.
+        serviceScope.launch {
+            lyricsRepository.purgeImplausibleCachedEntries()
+        }
 
         restoreIdempotencyShield()
         startHistoryWorker()
@@ -3678,6 +3723,11 @@ class MusicNotificationListener : NotificationListenerService() {
     companion object {
         private const val TAG = "MusicListener"
         private const val PROGRESS_TICK_MS = 15_000L
+        // Conjunto Reconciliación-Estado-Reproducción-1: misma tolerancia (800ms) que ya usa
+        // la detección de seek existente en onPlaybackStateChanged — un salto de posición
+        // menor a esto se explica por el simple paso del tiempo entre la lectura y la
+        // comparación, no es una divergencia real.
+        private const val RECONCILE_POSITION_TOLERANCE_MS = 800L
         private var lastCommittedInfo: MusicInfo? = null
         fun getLatestMusicInfo(): MusicInfo? = lastCommittedInfo
 
