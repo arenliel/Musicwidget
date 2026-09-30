@@ -142,35 +142,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         // Progreso de ejemplo (40 %) de la barra en las previsualizaciones: la onda se dibuja entre el 10 % y el 95 %.
         internal const val PREVIEW_SAMPLE_PROGRESS = 0.4f
 
-        // Conjunto Previews-Wide-1: canción e historial de EJEMPLO (ficticios) para las previsualizaciones.
-        private fun previewSampleMusicInfo(context: Context): MusicInfo = MusicInfo(
-            title = context.getString(R.string.preview_sample_title),
-            artist = context.getString(R.string.preview_sample_artist),
-            packageName = context.packageName,
-            trackKey = "preview_sample_track",
-            showLyrics = false
-        )
-
-        private fun previewSampleHistory(context: Context): List<HistoryItem> = listOf(
-            HistoryItem(
-                title = context.getString(R.string.preview_sample_history_1_title),
-                artist = context.getString(R.string.preview_sample_history_1_artist),
-                packageName = context.packageName, artworkPath = "", artworkKey = "",
-                trackKey = "preview_sample_history_1", timestamp = 3L, streakDays = 5
-            ),
-            HistoryItem(
-                title = context.getString(R.string.preview_sample_history_2_title),
-                artist = context.getString(R.string.preview_sample_history_2_artist),
-                packageName = context.packageName, artworkPath = "", artworkKey = "",
-                trackKey = "preview_sample_history_2", timestamp = 2L, playsToday = 4
-            ),
-            HistoryItem(
-                title = context.getString(R.string.preview_sample_history_3_title),
-                artist = context.getString(R.string.preview_sample_history_3_artist),
-                packageName = context.packageName, artworkPath = "", artworkKey = "",
-                trackKey = "preview_sample_history_3", timestamp = 1L
-            )
-        )
+        // Conjunto Previews-Ajustes-1: máximo de filas de historial que dibuja la previsualización (las filas reales).
+        // Se eliminaron la canción y el historial de EJEMPLO (ficticios): la previsualización usa datos reales o,
+        // si no hay ninguno, el estado vacío real del widget.
+        internal const val PREVIEW_HISTORY_MAX_ITEMS = 4
 
         val bitmapCache: LruCache<String, Bitmap> by lazy {
             val maxMemory = Runtime.getRuntime().maxMemory() / 1024
@@ -346,18 +321,22 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     override suspend fun providePreview(context: Context, widgetCategory: Int) {
         val dataStore = MusicDataStore(context)
         val storedInfo = withTimeoutOrNull(500) { dataStore.musicInfoFlow.firstOrNull() }
-        val isRealData = storedInfo != null && storedInfo.title.isNotEmpty()
-        // Conjunto Previews-Wide-1: la previsualización enseña el widget "en uso" (sesión activa, reproduciendo, con
-        // historial de ejemplo) para que los controles y la barra se vean con su aspecto real. Con datos reales se
-        // conserva la última canción del usuario, pero se ignoran su letra y su historial (datos personales).
-        val musicInfo = (if (isRealData) storedInfo!! else previewSampleMusicInfo(context)).copy(
-            isPlaying = true,
-            isSessionActive = true,
-            isBuffering = false,
-            currentLyric = "",
-            lyricsTrackKey = "",
-            history = previewSampleHistory(context)
-        )
+        // Conjunto Previews-Ajustes-1: se pasa por el MISMO motor de presentación que usa el widget real
+        // (toDisplayedState): sin datos guardados, o con una app de la lista negra, sale el estado vacío real
+        // ("Empieza a sonar", historial de formas, controles atenuados). Con datos reales se muestra la última
+        // canción del usuario "en uso" (reproduciendo, con controles activos) y su historial REAL (sin su letra).
+        val displayedStored = (storedInfo ?: MusicInfo(title = "", artist = "", packageName = "")).toDisplayedState(context)
+        val isRealData = !displayedStored.isEmpty
+        val musicInfo = if (isRealData) {
+            displayedStored.copy(
+                isPlaying = true,
+                isSessionActive = true,
+                isBuffering = false,
+                currentLyric = "",
+                lyricsTrackKey = ""
+            )
+        } else displayedStored
+
         
         val albumArtFile = File(context.filesDir, ALBUM_ART_FILE)
         val albumArtRawFile = File(context.filesDir, ALB_RAW_FILE)
@@ -524,7 +503,8 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                                 info = info,
                                 showProgressBar = controls.showProgressBar,
                                 barWidthDp = textColumnWidthDp - CollisionSensor.CONTROLS_GROUP_WIDTH_DP - CollisionSensor.CONTROLS_BAR_GAP_DP,
-                                previewProgress = previewProgress
+                                previewProgress = previewProgress,
+                                isPreview = isPreview
                             )
                         } else {
                             // 2. Contenedor de Metadatos con Ecuador Visual (v1.6.0)
@@ -552,7 +532,8 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     HistoryList(
                         context, info.history, info.sessionIdentity,
                         headerEndReserve = if (fabOverHistoryHeader) (CollisionSensor.PLAY_BUTTON_WIDTH_DP + 8f).dp else 0.dp,
-                        asColumn = isPreview
+                        asColumn = isPreview,
+                        isEmptyState = info.isEmpty
                     )
 
                     // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
@@ -584,14 +565,14 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     private fun controlsEnabled(info: MusicInfo): Boolean = info.isSessionActive && !info.isEmpty
 
     @Composable
-    private fun PlaybackControlsRow(context: Context, info: MusicInfo, showProgressBar: Boolean, barWidthDp: Float, previewProgress: Float?) {
+    private fun PlaybackControlsRow(context: Context, info: MusicInfo, showProgressBar: Boolean, barWidthDp: Float, previewProgress: Float?, isPreview: Boolean) {
         val enabled = controlsEnabled(info)
         Row(
             modifier = GlanceModifier.fillMaxWidth().height(CollisionSensor.CONTROLS_ROW_HEIGHT_DP.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (showProgressBar) {
-                ProgressTrack(context = context, modifier = GlanceModifier.defaultWeight(), info = info, barWidthDp = barWidthDp, enabled = enabled, previewProgress = previewProgress)
+                ProgressTrack(context = context, modifier = GlanceModifier.defaultWeight(), info = info, barWidthDp = barWidthDp, enabled = enabled, previewProgress = previewProgress, isPreview = isPreview)
                 Spacer(GlanceModifier.width(CollisionSensor.CONTROLS_BAR_GAP_DP.dp))
             } else {
                 Spacer(GlanceModifier.defaultWeight())
@@ -606,7 +587,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     // (WavyProgressRenderer, con caché) y se refresca con el mismo tick de 15 s de PlaybackClock.
     // Sin sesión (deshabilitado): sin tramo recorrido y colores neutros (surfaceVariant / outline).
     @Composable
-    private fun ProgressTrack(context: Context, modifier: GlanceModifier, info: MusicInfo, barWidthDp: Float, enabled: Boolean, previewProgress: Float?) {
+    private fun ProgressTrack(context: Context, modifier: GlanceModifier, info: MusicInfo, barWidthDp: Float, enabled: Boolean, previewProgress: Float?, isPreview: Boolean) {
         val fraction = if (!enabled) 0f else previewProgress ?: PlaybackClock.fraction(info.sessionIdentity, info.isPlaying, android.os.SystemClock.elapsedRealtime())
         val activeColor = GlanceTheme.colors.primary.getColor(context).toArgb()
         val trackColor = (if (enabled) GlanceTheme.colors.secondaryContainer else GlanceTheme.colors.surfaceVariant).getColor(context).toArgb()
@@ -615,7 +596,11 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         Image(
             provider = ImageProvider(bitmap),
             contentDescription = null,
-            contentScale = ContentScale.FillBounds,
+            // Conjunto Previews-Ajustes-1: en el widget real Android entrega el ancho exacto que calculó el motor y
+            // FillBounds encaja sin deformar. En la previsualización el selector coloca la imagen en su propia tarjeta,
+            // de un ancho algo distinto: FillBounds la estiraba y los bordes redondos se volvían óvalos. Fit conserva
+            // la proporción (la barra puede quedar algo más grande o pequeña, pero siempre con bordes redondos).
+            contentScale = if (isPreview) ContentScale.Fit else ContentScale.FillBounds,
             modifier = modifier.height(WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp)
         )
     }
@@ -724,13 +709,13 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         Text(
             text = if (isFresh) status.uppercase() else status,
             modifier = GlanceModifier.padding(end = endReserve),
-            style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(R.dimen.text_size_status), fontWeight = if (isFresh) FontWeight.Bold else FontWeight.Medium),
+            style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(if (isFresh) R.dimen.text_size_status_caps else R.dimen.text_size_status), fontWeight = if (isFresh) FontWeight.Bold else FontWeight.Medium),
             maxLines = 1
         )
     }
 
     @Composable
-    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String, headerEndReserve: Dp = 0.dp, asColumn: Boolean = false) {
+    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String, headerEndReserve: Dp = 0.dp, asColumn: Boolean = false, isEmptyState: Boolean = false) {
         val historyHeaderTextSize = spDimen(R.dimen.text_size_history_header)
         val historyHeaderIconSize = dimen(R.dimen.history_header_icon_size)
         
@@ -754,7 +739,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     Image(provider = ImageProvider(R.drawable.clear_all_24px), contentDescription = context.getString(R.string.content_desc_clear_history), colorFilter = ColorFilter.tint(GlanceTheme.colors.onSurfaceVariant), modifier = GlanceModifier.size(historyHeaderIconSize).clickable(actionRunCallback<ClearHistoryAction>()))
                 }
             }
-            if (history.isEmpty()) {
+            // Conjunto Previews-Ajustes-1: en el ESTADO VACÍO del widget (sin datos reales) el historial se muestra como
+            // filas de formas (esqueleto), sin texto. El aviso "El historial aparecerá aquí" queda solo para una sesión
+            // real cuyo historial está vacío (p. ej. el usuario lo acaba de limpiar).
+            if (history.isEmpty() && !isEmptyState) {
                 Box(
                     modifier = GlanceModifier.fillMaxSize().padding(top = 12.dp),
                     contentAlignment = Alignment.Center
@@ -774,7 +762,7 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                     // datos se cargan al ejecutar; no son fiables en previsualizaciones. En previsualización se dibujan
                     // las MISMAS filas reales (HistoryItemRow) dentro de una Column normal, sin adaptador.
                     Column(modifier = GlanceModifier.defaultWeight()) {
-                        itemsToRender.forEach { item -> HistoryItemRow(context, item) }
+                        itemsToRender.take(PREVIEW_HISTORY_MAX_ITEMS).forEach { item -> HistoryItemRow(context, item) }
                     }
                 } else LazyColumn(modifier = GlanceModifier.defaultWeight()) {
                     items(items = itemsToRender, itemId = { item -> item.timestamp }) { item -> 

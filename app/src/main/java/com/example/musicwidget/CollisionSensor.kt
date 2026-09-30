@@ -35,6 +35,11 @@ object CollisionSensor {
     const val TITLE_SIZE_SP = 14f
     const val ARTIST_SIZE_SP = 12f
     const val STATUS_SIZE_SP = 10f
+    // Conjunto Previews-Ajustes-1: el texto de estado ("ESTÁ SONANDO") se dibuja en mayúsculas y negrita cuando la
+    // sesión es reciente; a 10sp sus mayúsculas miden casi lo mismo que las minúsculas del título (14sp) y compiten
+    // con él. En ese modo baja a STATUS_CAPS_SIZE_SP. El motor SIGUE reservando STATUS_SIZE_SP (10sp) para el
+    // alto del bloque superior: el texto está anclado al fondo de su bloque, así que sobra 1sp de aire y nunca falta.
+    const val STATUS_CAPS_SIZE_SP = 9f
     const val LINE_HEIGHT_FACTOR = 1.3f
     const val OVERLINE_TITLE_GAP_DP = 2f
     const val TITLE_ARTIST_GAP_DP = 6f

@@ -90,4 +90,26 @@ class WavyProgressGeometryTest {
         assertEquals(5f, WavyProgressGeometry.waveY(2f, 0f), 0.001f)
         assertEquals(5f, WavyProgressGeometry.waveY(37f, 0f), 0.001f)
     }
+
+    // Conjunto Previews-Ajustes-1: la longitud de onda se adapta al ancho de la barra.
+    @Test
+    fun longitudDeOnda_seAdaptaAlAnchoDeLaBarra() {
+        assertEquals(26.1f, WavyProgressGeometry.wavelengthDp(58f), 0.001f)
+        assertEquals(24f, WavyProgressGeometry.wavelengthDp(40f), 0.001f)
+        assertEquals(40f, WavyProgressGeometry.wavelengthDp(200f), 0.001f)
+    }
+
+    @Test
+    fun longitudDeOnda_siempreEstaEntreElMinimoYElValorDeSiempre() {
+        for (w in listOf(0f, 10f, 40f, 58f, 88f, 89f, 120f, 400f)) {
+            val l = WavyProgressGeometry.wavelengthDp(w)
+            assertTrue("w=$w l=$l", l >= WavyProgressGeometry.MIN_WAVELENGTH_DP && l <= WavyProgressGeometry.WAVELENGTH_DP)
+        }
+    }
+
+    @Test
+    fun onda_conLongitudPropiaAlcanzaLaCrestaAlCuarto() {
+        // Longitud 20dp: cuarto de onda a los 5dp desde el inicio del trazo (x = 2 + 5): cresta = 5 + 3
+        assertEquals(8f, WavyProgressGeometry.waveY(7f, 3f, 20f), 0.001f)
+    }
 }

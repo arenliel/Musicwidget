@@ -45,6 +45,7 @@ object WavyProgressRenderer {
 
         val lay = WavyProgressGeometry.layout(wDp, p)
         val amplitude = WavyProgressGeometry.amplitudeDp(p, isPlaying)
+        val wavelength = WavyProgressGeometry.wavelengthDp(wDp)
         val centerY = WavyProgressGeometry.CONTAINER_HEIGHT_DP / 2f
 
         val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -70,10 +71,10 @@ object WavyProgressRenderer {
                 strokePaint.color = activeColor
                 val path = Path()
                 var x = lay.activeStartX
-                path.moveTo(x, WavyProgressGeometry.waveY(x, amplitude))
+                path.moveTo(x, WavyProgressGeometry.waveY(x, amplitude, wavelength))
                 while (x < lay.activeEndX) {
                     x = min(x + 1f, lay.activeEndX)
-                    path.lineTo(x, WavyProgressGeometry.waveY(x, amplitude))
+                    path.lineTo(x, WavyProgressGeometry.waveY(x, amplitude, wavelength))
                 }
                 canvas.drawPath(path, strokePaint)
             }

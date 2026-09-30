@@ -16,6 +16,12 @@ object WavyProgressGeometry {
     const val STROKE_DP = 4f
     const val AMPLITUDE_DP = 3f
     const val WAVELENGTH_DP = 40f
+    // Conjunto Previews-Ajustes-1: 40dp es la longitud de onda del componente de Material 3 Expressive, pensada para
+    // barras largas (200dp o más). En el widget la barra mide entre ~40 y ~90dp, y con 40dp el tramo recorrido ni
+    // siquiera contiene una onda completa. La longitud se adapta al ancho de la barra (ver wavelengthDp): nunca
+    // supera WAVELENGTH_DP (barras largas = valor de siempre) ni baja de MIN_WAVELENGTH_DP.
+    const val MIN_WAVELENGTH_DP = 24f
+    const val WAVELENGTH_BAR_FRACTION = 0.45f
     const val GAP_DP = 4f
     const val STOP_SIZE_DP = 4f
     private const val WAVE_MIN_PROGRESS = 0.1f
@@ -57,9 +63,13 @@ object WavyProgressGeometry {
         )
     }
 
+    /** Longitud de onda (dp) para una barra de [barWidthDp]: 45 % del ancho, entre MIN_WAVELENGTH_DP y WAVELENGTH_DP. */
+    fun wavelengthDp(barWidthDp: Float): Float =
+        (barWidthDp * WAVELENGTH_BAR_FRACTION).coerceIn(MIN_WAVELENGTH_DP, WAVELENGTH_DP)
+
     /** Coordenada y (dp, desde arriba del contenedor) de la onda en [x]. Con amplitud 0 es la línea central. */
-    fun waveY(x: Float, amplitudeDp: Float): Float {
-        val phase = 2.0 * PI * (x - STROKE_DP / 2f) / WAVELENGTH_DP
+    fun waveY(x: Float, amplitudeDp: Float, wavelength: Float = WAVELENGTH_DP): Float {
+        val phase = 2.0 * PI * (x - STROKE_DP / 2f) / wavelength
         return CONTAINER_HEIGHT_DP / 2f + amplitudeDp * sin(phase).toFloat()
     }
 }
