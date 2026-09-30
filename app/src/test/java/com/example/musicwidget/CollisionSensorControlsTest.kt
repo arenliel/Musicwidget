@@ -24,10 +24,12 @@ class CollisionSensorControlsTest {
 
     @Test
     fun fuenteNormal_widgetAlto_muestraControlesConDosLineasYBarra() {
+        // Conjunto Previews-Ajustes-2: con el desplazamiento de 3dp las 2 líneas siguen cabiendo (3 + 106.4 = 109.4 <= 110).
         val r = eval(height = 250f, fontScale = 1.0f, lines = 2, columnWidth = 144f)
         assertTrue(r.showControls)
         assertEquals(2, r.artistLines)
         assertTrue(r.showProgressBar)
+        assertEquals(3f, r.textTopOffsetDp, 0.001f)
     }
 
     @Test
@@ -111,9 +113,10 @@ class CollisionSensorControlsTest {
     }
 
     @Test
-    fun botonPlaySolapaElEncabezadoDelHistorial_soloBajo238dp() {
-        // 34 + 110 + 16 (espacio) + 28 (encabezado) + 48 (botón) + 2 (aire) = 238dp
-        assertTrue(CollisionSensor.fabOverlapsHistoryHeader(237.9f, 110f))
+    fun botonPlayCubreElBotonDeLimpiar_soloBajo228dp() {
+        // 34 + 110 + 16 (espacio) + 20 (ícono de limpiar) + 48 (botón play) = 228dp. Sin aire extra: "casi tocarse" no es colisión.
+        assertTrue(CollisionSensor.fabOverlapsHistoryHeader(227.9f, 110f))
+        assertFalse(CollisionSensor.fabOverlapsHistoryHeader(228f, 110f))
         assertFalse(CollisionSensor.fabOverlapsHistoryHeader(238f, 110f))
     }
 
@@ -134,6 +137,22 @@ class CollisionSensorControlsTest {
         }
         assertFalse(controlsAt(195.9f))
         assertTrue(controlsAt(196f))
+    }
+
+    @Test
+    fun desplazamientoDelTexto_seReduceConFuenteGrande_sinOcultarControles() {
+        // Fuente 1.4: el texto necesita 109.52dp de los 110; solo sobran 0.48dp de desplazamiento, pero los controles siguen.
+        val r = eval(height = 250f, fontScale = 1.4f, lines = 2, columnWidth = 144f)
+        assertTrue(r.showControls)
+        assertEquals(0.48f, r.textTopOffsetDp, 0.01f)
+        assertEquals(3f, CollisionSensor.WIDE_TEXT_TOP_OFFSET_DP, 0f)
+    }
+
+    @Test
+    fun sinControles_noHayDesplazamientoDelTexto() {
+        val r = eval(height = 300f, fontScale = 1.5f, lines = 2, columnWidth = 144f)
+        assertFalse(r.showControls)
+        assertEquals(0f, r.textTopOffsetDp, 0f)
     }
 
     @Test

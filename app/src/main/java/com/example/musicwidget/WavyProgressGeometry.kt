@@ -16,12 +16,13 @@ object WavyProgressGeometry {
     const val STROKE_DP = 4f
     const val AMPLITUDE_DP = 3f
     const val WAVELENGTH_DP = 40f
-    // Conjunto Previews-Ajustes-1: 40dp es la longitud de onda del componente de Material 3 Expressive, pensada para
-    // barras largas (200dp o más). En el widget la barra mide entre ~40 y ~90dp, y con 40dp el tramo recorrido ni
-    // siquiera contiene una onda completa. La longitud se adapta al ancho de la barra (ver wavelengthDp): nunca
-    // supera WAVELENGTH_DP (barras largas = valor de siempre) ni baja de MIN_WAVELENGTH_DP.
-    const val MIN_WAVELENGTH_DP = 24f
-    const val WAVELENGTH_BAR_FRACTION = 0.45f
+    // Conjunto Previews-Ajustes-2: WAVELENGTH_DP (40dp) queda como REFERENCIA del componente de Material 3 Expressive
+    // (barras de 200dp o más) y como valor por defecto de waveY. En el widget la barra mide entre ~40 y ~90dp y con
+    // 40dp la onda se sentía separada, así que la longitud real se adapta al ancho de la barra (ver wavelengthDp),
+    // siempre entre MIN_WAVELENGTH_DP y MAX_WAVELENGTH_DP.
+    const val MIN_WAVELENGTH_DP = 20f
+    const val MAX_WAVELENGTH_DP = 24f
+    const val WAVELENGTH_BAR_FRACTION = 0.4f
     const val GAP_DP = 4f
     const val STOP_SIZE_DP = 4f
     private const val WAVE_MIN_PROGRESS = 0.1f
@@ -63,9 +64,19 @@ object WavyProgressGeometry {
         )
     }
 
-    /** Longitud de onda (dp) para una barra de [barWidthDp]: 45 % del ancho, entre MIN_WAVELENGTH_DP y WAVELENGTH_DP. */
+    /** Longitud de onda (dp) para una barra de [barWidthDp]: 40 % del ancho, entre MIN_WAVELENGTH_DP y MAX_WAVELENGTH_DP. */
     fun wavelengthDp(barWidthDp: Float): Float =
-        (barWidthDp * WAVELENGTH_BAR_FRACTION).coerceIn(MIN_WAVELENGTH_DP, WAVELENGTH_DP)
+        (barWidthDp * WAVELENGTH_BAR_FRACTION).coerceIn(MIN_WAVELENGTH_DP, MAX_WAVELENGTH_DP)
+
+    /**
+     * Conjunto Previews-Ajustes-2: ancho (dp) de la imagen que contiene SOLO el tramo recorrido (desde el borde izquierdo
+     * de la barra hasta el borde derecho de su extremo redondeado). Lo usan por igual el renderizador (tamaño del bitmap)
+     * y la UI (tamaño de la imagen), para que coincidan exactamente y no haya deformación.
+     */
+    fun activeSegmentWidthDp(barWidthDp: Float, progress: Float): Float {
+        val w = barWidthDp.coerceAtLeast(STROKE_DP * 2f)
+        return (layout(w, progress).activeEndX + STROKE_DP / 2f).coerceAtLeast(STROKE_DP)
+    }
 
     /** Coordenada y (dp, desde arriba del contenedor) de la onda en [x]. Con amplitud 0 es la línea central. */
     fun waveY(x: Float, amplitudeDp: Float, wavelength: Float = WAVELENGTH_DP): Float {

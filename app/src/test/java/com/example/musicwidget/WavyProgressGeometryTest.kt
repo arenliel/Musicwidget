@@ -91,20 +91,27 @@ class WavyProgressGeometryTest {
         assertEquals(5f, WavyProgressGeometry.waveY(37f, 0f), 0.001f)
     }
 
-    // Conjunto Previews-Ajustes-1: la longitud de onda se adapta al ancho de la barra.
+    // Conjunto Previews-Ajustes-2: la longitud de onda se adapta al ancho de la barra, entre 20 y 24dp.
     @Test
     fun longitudDeOnda_seAdaptaAlAnchoDeLaBarra() {
-        assertEquals(26.1f, WavyProgressGeometry.wavelengthDp(58f), 0.001f)
-        assertEquals(24f, WavyProgressGeometry.wavelengthDp(40f), 0.001f)
-        assertEquals(40f, WavyProgressGeometry.wavelengthDp(200f), 0.001f)
+        assertEquals(23.2f, WavyProgressGeometry.wavelengthDp(58f), 0.001f)
+        assertEquals(20f, WavyProgressGeometry.wavelengthDp(40f), 0.001f)
+        assertEquals(24f, WavyProgressGeometry.wavelengthDp(200f), 0.001f)
     }
 
     @Test
-    fun longitudDeOnda_siempreEstaEntreElMinimoYElValorDeSiempre() {
-        for (w in listOf(0f, 10f, 40f, 58f, 88f, 89f, 120f, 400f)) {
+    fun longitudDeOnda_siempreEstaEntreElMinimoYElMaximo() {
+        for (w in listOf(0f, 10f, 40f, 58f, 60f, 90f, 120f, 400f)) {
             val l = WavyProgressGeometry.wavelengthDp(w)
-            assertTrue("w=$w l=$l", l >= WavyProgressGeometry.MIN_WAVELENGTH_DP && l <= WavyProgressGeometry.WAVELENGTH_DP)
+            assertTrue("w=$w l=$l", l >= WavyProgressGeometry.MIN_WAVELENGTH_DP && l <= WavyProgressGeometry.MAX_WAVELENGTH_DP)
         }
+    }
+
+    @Test
+    fun anchoDelTramoRecorrido_esElProgresoPorElAnchoDeLaBarra() {
+        // activeEnd = p * W - 2 (mitad del hueco); el bitmap llega hasta el borde del extremo redondeado (+2) = p * W
+        assertEquals(23.2f, WavyProgressGeometry.activeSegmentWidthDp(58f, 0.4f), 0.001f)
+        assertEquals(49.5f, WavyProgressGeometry.activeSegmentWidthDp(90f, 0.55f), 0.001f)
     }
 
     @Test

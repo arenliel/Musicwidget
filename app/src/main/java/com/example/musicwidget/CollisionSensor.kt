@@ -17,11 +17,15 @@ data class CollisionResult(
  * - showControls: si se muestran (todo o nada: FAB play/pausa + grupo prev/next + barra).
  * - artistLines: líneas de artista/letra finales (puede bajar de 2 a 1 para que quepan los controles).
  * - showProgressBar: si además hay ancho suficiente para la barra de progreso.
+ * - textTopOffsetDp (Previews-Ajustes-2): cuánto se baja el bloque de texto (estado + título + artista) respecto al
+ *   borde superior de la portada. Es WIDE_TEXT_TOP_OFFSET_DP, o menos si con fuentes grandes solo sobra menos;
+ *   0 cuando no hay controles (entonces el texto va centrado en la altura de la portada y no se desplaza).
  */
 data class ControlsResult(
     val showControls: Boolean,
     val artistLines: Int,
-    val showProgressBar: Boolean
+    val showProgressBar: Boolean,
+    val textTopOffsetDp: Float = 0f
 )
 
 object CollisionSensor {
@@ -35,11 +39,6 @@ object CollisionSensor {
     const val TITLE_SIZE_SP = 14f
     const val ARTIST_SIZE_SP = 12f
     const val STATUS_SIZE_SP = 10f
-    // Conjunto Previews-Ajustes-1: el texto de estado ("ESTÁ SONANDO") se dibuja en mayúsculas y negrita cuando la
-    // sesión es reciente; a 10sp sus mayúsculas miden casi lo mismo que las minúsculas del título (14sp) y compiten
-    // con él. En ese modo baja a STATUS_CAPS_SIZE_SP. El motor SIGUE reservando STATUS_SIZE_SP (10sp) para el
-    // alto del bloque superior: el texto está anclado al fondo de su bloque, así que sobra 1sp de aire y nunca falta.
-    const val STATUS_CAPS_SIZE_SP = 9f
     const val LINE_HEIGHT_FACTOR = 1.3f
     const val OVERLINE_TITLE_GAP_DP = 2f
     const val TITLE_ARTIST_GAP_DP = 6f
@@ -52,10 +51,9 @@ object CollisionSensor {
     const val CONTROLS_BAR_MIN_WIDTH_DP = 40f       // Ancho mínimo para que la barra se muestre
     const val PLAY_BUTTON_WIDTH_DP = 64f
     const val PLAY_BUTTON_HEIGHT_DP = 48f
-    private const val PLAY_BUTTON_CLEARANCE_DP = 2f // Aire entre el botón play y el encabezado del historial
     const val WIDGET_PADDING_TOTAL_DP = 34f     // 17dp arriba + 17dp abajo (R.dimen.widget_padding × 2); una prueba verifica la paridad con dimens.xml
     private const val HISTORY_SPACER_DP = 16f       // Spacer entre la fila de píldora y el historial
-    private const val HISTORY_HEADER_DP = 28f       // Encabezado del historial: ícono 20dp + 8dp de padding inferior
+    private const val HISTORY_CLEAR_ICON_DP = 20f   // Alto del ícono de limpiar historial (el resto del encabezado es padding inferior)
 
     // Conjunto Consolidacion-Wide-1: umbrales de conmutación de layout y tamaño de la píldora (SSOT).
     // Antes eran números sueltos repetidos en evaluate() y en MusicWidgetUI. Los valores NO cambian.
@@ -83,6 +81,13 @@ object CollisionSensor {
     //    controles, barra de progreso e historial. Debe ser >= minWideWidthForProgressBarDp() (una prueba lo verifica).
     const val WIDE_TEXT_COLUMN_START_PADDING_DP = 12f
     const val WIDE_FULL_PREVIEW_SIZE_DP = 300f
+
+    // Conjunto Previews-Ajustes-2: en Wide con controles, el bloque de texto (estado + título + artista/letra) se baja
+    // WIDE_TEXT_TOP_OFFSET_DP respecto al borde superior de la portada, para que la portada sobresalga por arriba.
+    // El desplazamiento cuenta en el cálculo de colisión (evaluateControls): con la letra a 2 líneas caben justo
+    // (3 + 106.4 = 109.4 <= 110dp) y se mantienen; con fuentes grandes el desplazamiento se reduce a lo que sobra
+    // ANTES de perder líneas o controles. Sin controles el texto va centrado en la altura de la portada y no se desplaza.
+    const val WIDE_TEXT_TOP_OFFSET_DP = 3f
 
     /** Ancho (dp) de la columna de texto de Wide: ancho del widget - padding lateral - píldora - separación. */
     fun wideTextColumnWidthDp(widgetWidthDp: Float, pillSizeDp: Float = WIDE_PILL_SIZE_DP): Float =
@@ -191,12 +196,13 @@ object CollisionSensor {
         WIDGET_PADDING_TOTAL_DP + pillSizeDp + CONTROLS_GAP_DP + PLAY_BUTTON_HEIGHT_DP
 
     /**
-     * Conjunto Ajustes-Motor-1: `true` si el botón play/pausa queda sobre el encabezado del historial
-     * (su botón de limpiar quedaría tapado). La UI reserva entonces ancho al final del encabezado.
+     * Conjunto Previews-Ajustes-2: `true` SOLO si el botón play/pausa CUBRE de verdad el botón de limpiar historial
+     * (el ícono de 20dp; el padding inferior del encabezado no cuenta). Entonces la UI oculta ese botón; en cuanto
+     * el play deja de cubrirlo (aunque quede a 0dp), el botón vuelve a su sitio de siempre. (Nombre histórico.)
      */
     fun fabOverlapsHistoryHeader(widgetHeightDp: Float, pillSizeDp: Float): Boolean =
-        widgetHeightDp < WIDGET_PADDING_TOTAL_DP + pillSizeDp + HISTORY_SPACER_DP + HISTORY_HEADER_DP +
-            PLAY_BUTTON_HEIGHT_DP + PLAY_BUTTON_CLEARANCE_DP
+        widgetHeightDp < WIDGET_PADDING_TOTAL_DP + pillSizeDp + HISTORY_SPACER_DP + HISTORY_CLEAR_ICON_DP +
+            PLAY_BUTTON_HEIGHT_DP
 
     /**
      * Conjunto Controles-Motor-1: decide si Layout4x4 muestra los controles de reproducción.
@@ -204,11 +210,13 @@ object CollisionSensor {
      * Reglas (todo o nada — nunca se muestra un subconjunto de los botones):
      *  1. El botón play/pausa flota en la esquina inferior derecha: solo se muestra si el widget es lo
      *     bastante alto para que NO se solape con la fila de controles prev/next + barra
-     *     ([minWidgetHeightForControlsDp]). Puede quedar sobre el encabezado del historial: eso lo
-     *     resuelve la UI reservando ancho ([fabOverlapsHistoryHeader]), no ocultando los controles.
+     *     ([minWidgetHeightForControlsDp]). Puede quedar sobre el encabezado del historial: en ese caso la UI
+     *     oculta el botón de limpiar historial ([fabOverlapsHistoryHeader]); no se ocultan los controles.
      *  2. Bloque superior + texto de artista + separación + fila de controles deben caber en la
      *     altura de la píldora. Se intenta con las líneas de artista que decidió evaluate(); si no
-     *     caben y eran 2, se baja a 1; si con 1 tampoco caben, no se muestran controles.
+     *     caben (contando además WIDE_TEXT_TOP_OFFSET_DP en el caso de 2 líneas) y eran 2, se baja a 1; si con 1
+     *     tampoco caben, no se muestran controles. El desplazamiento del texto que se aplica al final es el que
+     *     realmente sobra (hasta WIDE_TEXT_TOP_OFFSET_DP): con fuentes grandes se reduce, nunca oculta controles.
      *  3. La barra de progreso solo se muestra si, junto al grupo prev/next, le quedan al menos
      *     CONTROLS_BAR_MIN_WIDTH_DP de ancho dentro de la columna de texto.
      *
@@ -230,7 +238,7 @@ object CollisionSensor {
             top + artistBlockHeightDp(fontScale, lines) + CONTROLS_GAP_DP + CONTROLS_ROW_HEIGHT_DP
 
         var lines = sensorMaxArtistLines
-        if (lines >= 2 && needed(2) > pillSizeDp) lines = 1
+        if (lines >= 2 && WIDE_TEXT_TOP_OFFSET_DP + needed(2) > pillSizeDp) lines = 1
         if (needed(lines) > pillSizeDp) {
             return ControlsResult(showControls = false, artistLines = sensorMaxArtistLines, showProgressBar = false)
         }
@@ -239,7 +247,8 @@ object CollisionSensor {
         return ControlsResult(
             showControls = true,
             artistLines = lines,
-            showProgressBar = barWidth >= CONTROLS_BAR_MIN_WIDTH_DP
+            showProgressBar = barWidth >= CONTROLS_BAR_MIN_WIDTH_DP,
+            textTopOffsetDp = (pillSizeDp - needed(lines)).coerceIn(0f, WIDE_TEXT_TOP_OFFSET_DP)
         )
     }
 }

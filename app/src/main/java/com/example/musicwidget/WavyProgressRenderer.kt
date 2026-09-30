@@ -17,6 +17,63 @@ import kotlin.math.roundToInt
  */
 object WavyProgressRenderer {
     private val cache = LruCache<String, Bitmap>(8)
+    private val activeCache = LruCache<String, Bitmap>(8)
+
+    /**
+     * Conjunto Previews-Ajustes-2: dibuja SOLO el tramo recorrido (onda o línea) como un bitmap de su tamaño exacto
+     * ([WavyProgressGeometry.activeSegmentWidthDp] x alto del contenedor). La previsualización lo coloca con un tamaño
+     * fijo en dp y dibuja la pista con elementos normales que se estiran con el hueco, así ninguna parte se deforma.
+     */
+    @Synchronized
+    fun renderActiveSegment(
+        context: Context,
+        barWidthDp: Float,
+        progress: Float,
+        isPlaying: Boolean,
+        activeColor: Int
+    ): Bitmap {
+        val density = context.resources.displayMetrics.density
+        val wDp = barWidthDp.coerceAtLeast(WavyProgressGeometry.STROKE_DP * 2f)
+        val p = progress.coerceIn(0f, 1f)
+        val lay = WavyProgressGeometry.layout(wDp, p)
+        val segDp = WavyProgressGeometry.activeSegmentWidthDp(barWidthDp, p)
+        val wPx = (segDp * density).roundToInt().coerceAtLeast(1)
+        val hPx = (WavyProgressGeometry.CONTAINER_HEIGHT_DP * density).roundToInt().coerceAtLeast(1)
+        val amplitude = WavyProgressGeometry.amplitudeDp(p, isPlaying)
+        val wavelength = WavyProgressGeometry.wavelengthDp(wDp)
+
+        val key = "$wPx|$hPx|$amplitude|$wavelength|$activeColor|${lay.activeEndX}"
+        activeCache.get(key)?.let { return it }
+
+        val bitmap = Bitmap.createBitmap(wPx, hPx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.scale(wPx / segDp, hPx / WavyProgressGeometry.CONTAINER_HEIGHT_DP)
+        val centerY = WavyProgressGeometry.CONTAINER_HEIGHT_DP / 2f
+
+        if (lay.activeEndX - lay.activeStartX < 0.01f) {
+            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL; color = activeColor }
+            canvas.drawCircle(lay.activeStartX, centerY, WavyProgressGeometry.STROKE_DP / 2f, fill)
+        } else {
+            val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = WavyProgressGeometry.STROKE_DP
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+                color = activeColor
+            }
+            val path = Path()
+            var x = lay.activeStartX
+            path.moveTo(x, WavyProgressGeometry.waveY(x, amplitude, wavelength))
+            while (x < lay.activeEndX) {
+                x = min(x + 1f, lay.activeEndX)
+                path.lineTo(x, WavyProgressGeometry.waveY(x, amplitude, wavelength))
+            }
+            canvas.drawPath(path, stroke)
+        }
+
+        activeCache.put(key, bitmap)
+        return bitmap
+    }
 
     @Synchronized
     fun render(

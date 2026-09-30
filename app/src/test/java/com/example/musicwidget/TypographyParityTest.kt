@@ -41,12 +41,6 @@ class TypographyParityTest {
     }
 
     @Test
-    fun estadoEnMayusculasCoincideConElMotorYEsMenorQueElNormal() {
-        assertEquals(CollisionSensor.STATUS_CAPS_SIZE_SP, dimenValue("text_size_status_caps", "sp"), 0.001f)
-        org.junit.Assert.assertTrue(CollisionSensor.STATUS_CAPS_SIZE_SP < CollisionSensor.STATUS_SIZE_SP)
-    }
-
-    @Test
     fun paddingDelWidgetCoincideConElMotor() {
         assertEquals(CollisionSensor.WIDGET_PADDING_TOTAL_DP, dimenValue("widget_padding", "dp") * 2f, 0.001f)
     }

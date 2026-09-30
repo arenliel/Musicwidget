@@ -485,6 +485,10 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                             // y el bloque de artista/letra tienen alto fijo, calculado por el motor, así que el
                             // título y el estado NO rebotan cuando la letra pasa de 1 a 2 líneas. El sobrante
                             // de altura (siempre >= CONTROLS_GAP_DP) queda entre el artista y la fila de controles.
+                            // Conjunto Previews-Ajustes-2: el bloque de texto baja textTopOffsetDp (3dp, o menos con
+                            // fuentes grandes) para que la portada sobresalga por arriba. Lo decide el motor y ya cuenta
+                            // en la colisión con los controles.
+                            Spacer(GlanceModifier.height(controls.textTopOffsetDp.dp))
                             Box(
                                 modifier = GlanceModifier.fillMaxWidth().height(CollisionSensor.topBlockHeightDp(fontScale).dp),
                                 contentAlignment = Alignment.BottomStart
@@ -524,18 +528,17 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
                 Spacer(GlanceModifier.size(16.dp))
                 // CONTENEDOR CON DESVANECIMIENTO (Fading Scrim v1.8.0)
                 Box(modifier = GlanceModifier.defaultWeight(), contentAlignment = Alignment.BottomCenter) {
-                    // Conjunto Ajustes-Umbral-1: entre el alto mínimo de los controles y 238dp (píldora máxima) el
-                    // botón play flotante queda sobre el encabezado del historial. Se reserva su ancho (+8dp de aire)
-                    // al final del encabezado para que el botón de limpiar historial siga visible y tocable.
-                    val fabOverHistoryHeader = controls.showControls &&
+                    // Conjunto Previews-Ajustes-2: el botón de limpiar historial se queda SIEMPRE en su sitio (esquina
+                    // superior derecha del encabezado). Solo se oculta cuando el botón play/pausa lo CUBRE de verdad
+                    // (entre el alto mínimo de los controles y 228dp con píldora de 110dp); no se desplaza.
+                    val fabCoversClearButton = controls.showControls &&
                         CollisionSensor.fabOverlapsHistoryHeader(size.height.value, pillSize.value)
                     HistoryList(
                         context, info.history, info.sessionIdentity,
-                        headerEndReserve = if (fabOverHistoryHeader) (CollisionSensor.PLAY_BUTTON_WIDTH_DP + 8f).dp else 0.dp,
+                        hideClearButton = fabCoversClearButton,
                         asColumn = isPreview,
                         isEmptyState = info.isEmpty
                     )
-
                     // EL SCRIM: Desvanece sutilmente la última tarjeta para indicar scroll
                     Box(
                         modifier = GlanceModifier
@@ -592,17 +595,58 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         val activeColor = GlanceTheme.colors.primary.getColor(context).toArgb()
         val trackColor = (if (enabled) GlanceTheme.colors.secondaryContainer else GlanceTheme.colors.surfaceVariant).getColor(context).toArgb()
         val stopColor = (if (enabled) GlanceTheme.colors.primary else GlanceTheme.colors.outline).getColor(context).toArgb()
-        val bitmap = WavyProgressRenderer.render(context, barWidthDp, fraction, enabled && info.isPlaying, activeColor, trackColor, stopColor)
-        Image(
-            provider = ImageProvider(bitmap),
-            contentDescription = null,
-            // Conjunto Previews-Ajustes-1: en el widget real Android entrega el ancho exacto que calculó el motor y
-            // FillBounds encaja sin deformar. En la previsualización el selector coloca la imagen en su propia tarjeta,
-            // de un ancho algo distinto: FillBounds la estiraba y los bordes redondos se volvían óvalos. Fit conserva
-            // la proporción (la barra puede quedar algo más grande o pequeña, pero siempre con bordes redondos).
-            contentScale = if (isPreview) ContentScale.Fit else ContentScale.FillBounds,
-            modifier = modifier.height(WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp)
-        )
+        if (isPreview) {
+            PreviewProgressTrack(context, modifier, barWidthDp, fraction, enabled && info.isPlaying, enabled, activeColor)
+        } else {
+            val bitmap = WavyProgressRenderer.render(context, barWidthDp, fraction, enabled && info.isPlaying, activeColor, trackColor, stopColor)
+            Image(
+                provider = ImageProvider(bitmap),
+                contentDescription = null,
+                contentScale = ContentScale.FillBounds,
+                modifier = modifier.height(WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp)
+            )
+        }
+    }
+
+    // Conjunto Previews-Ajustes-2: barra de la PREVISUALIZACIÓN. En el selector el lanzador coloca la previsualización en
+    // su propia tarjeta, de un ancho que el widget no conoce: una sola imagen del ancho "calculado" se estiraba (bordes
+    // ovalados, Ajustes-1 con Fit la dejó corta). Aquí se compone en dos partes que no dependen del ancho real:
+    //  - tramo recorrido: imagen de TAMAÑO FIJO en dp (renderActiveSegment) — onda o línea, sin deformación;
+    //  - pista: elementos normales (cápsula de 4dp con bordes redondos + punto final) que ocupan todo el hueco restante.
+    // Sin sesión (deshabilitado) no hay tramo recorrido: solo pista y punto final.
+    @Composable
+    private fun PreviewProgressTrack(context: Context, modifier: GlanceModifier, barWidthDp: Float, fraction: Float, isWavePlaying: Boolean, enabled: Boolean, activeColor: Int) {
+        val hasActive = WavyProgressGeometry.layout(barWidthDp, fraction).hasActive
+        Row(modifier = modifier.height(WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (hasActive) {
+                val activeBitmap = WavyProgressRenderer.renderActiveSegment(context, barWidthDp, fraction, isWavePlaying, activeColor)
+                Image(
+                    provider = ImageProvider(activeBitmap),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = GlanceModifier.size(
+                        width = WavyProgressGeometry.activeSegmentWidthDp(barWidthDp, fraction).dp,
+                        height = WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp
+                    )
+                )
+                Spacer(GlanceModifier.width(WavyProgressGeometry.GAP_DP.dp))
+            }
+            Box(
+                modifier = GlanceModifier.defaultWeight().height(WavyProgressGeometry.CONTAINER_HEIGHT_DP.dp),
+                contentAlignment = Alignment.CenterEnd
+            ) {
+                Box(
+                    modifier = GlanceModifier.fillMaxWidth().height(WavyProgressGeometry.STROKE_DP.dp)
+                        .background(if (enabled) GlanceTheme.colors.secondaryContainer else GlanceTheme.colors.surfaceVariant)
+                        .cornerRadius((WavyProgressGeometry.STROKE_DP / 2f).dp)
+                ) {}
+                Box(
+                    modifier = GlanceModifier.size(WavyProgressGeometry.STOP_SIZE_DP.dp)
+                        .background(if (enabled) GlanceTheme.colors.primary else GlanceTheme.colors.outline)
+                        .cornerRadius((WavyProgressGeometry.STOP_SIZE_DP / 2f).dp)
+                ) {}
+            }
+        }
     }
 
     // Grupo conectado anterior/siguiente: una sola píldora tonal con un separador de 2dp entre los
@@ -709,13 +753,13 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         Text(
             text = if (isFresh) status.uppercase() else status,
             modifier = GlanceModifier.padding(end = endReserve),
-            style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(if (isFresh) R.dimen.text_size_status_caps else R.dimen.text_size_status), fontWeight = if (isFresh) FontWeight.Bold else FontWeight.Medium),
+            style = TextStyle(color = GlanceTheme.colors.onSurfaceVariant, fontSize = spDimen(R.dimen.text_size_status), fontWeight = if (isFresh) FontWeight.Bold else FontWeight.Medium),
             maxLines = 1
         )
     }
 
     @Composable
-    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String, headerEndReserve: Dp = 0.dp, asColumn: Boolean = false, isEmptyState: Boolean = false) {
+    private fun HistoryList(context: Context, history: List<HistoryItem>, currentSessionIdentity: String, hideClearButton: Boolean = false, asColumn: Boolean = false, isEmptyState: Boolean = false) {
         val historyHeaderTextSize = spDimen(R.dimen.text_size_history_header)
         val historyHeaderIconSize = dimen(R.dimen.history_header_icon_size)
         
@@ -733,9 +777,9 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
         } else filteredHistory
 
         Column(modifier = GlanceModifier.fillMaxSize()) {
-            Row(modifier = GlanceModifier.fillMaxWidth().padding(bottom = 8.dp, end = headerEndReserve), verticalAlignment = Alignment.CenterVertically) {
+            Row(modifier = GlanceModifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(text = context.getString(R.string.history_header), style = TextStyle(fontSize = historyHeaderTextSize, fontWeight = FontWeight.Bold, color = GlanceTheme.colors.primary), modifier = GlanceModifier.defaultWeight())
-                if (history.isNotEmpty()) {
+                if (history.isNotEmpty() && !hideClearButton) {
                     Image(provider = ImageProvider(R.drawable.clear_all_24px), contentDescription = context.getString(R.string.content_desc_clear_history), colorFilter = ColorFilter.tint(GlanceTheme.colors.onSurfaceVariant), modifier = GlanceModifier.size(historyHeaderIconSize).clickable(actionRunCallback<ClearHistoryAction>()))
                 }
             }
