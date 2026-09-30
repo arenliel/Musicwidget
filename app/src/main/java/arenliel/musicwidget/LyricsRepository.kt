@@ -2,6 +2,7 @@ package arenliel.musicwidget
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -10,12 +11,36 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.text.Normalizer
+import java.util.concurrent.ConcurrentHashMap
 
 data class LyricsEntry(val timestampMs: Long, val text: String)
 data class LyricsResult(val trackKey: String, val allEntries: List<LyricsEntry>)
 
 class LyricsRepository(private val context: Context) {
     private val lyricsDao = LyricsDatabase.getDatabase(context).lyricsDao()
+
+    // Conjunto Letras-Atomicas-14: resultado de una consulta a la red. Distingue
+    // entre lo que LRCLIB confirmó (`Found`, `NotFound`) y lo que no pudo
+    // confirmarse (`Unconfirmed`: rechazo de validación de identidad, error de red,
+    // timeout o código HTTP inesperado). Solo `NotFound` puede persistirse como
+    // "no encontrado" — un resultado sin confirmar no es evidencia de que la letra
+    // no exista.
+    private sealed class FetchOutcome {
+        data class Found(val lrc: String) : FetchOutcome()
+        object NotFound : FetchOutcome()
+        object Unconfirmed : FetchOutcome()
+    }
+
+    // Conjunto Letras-Atomicas-14: consultas de red en curso, por trackKey. Si ya hay
+    // una consulta en curso para la misma canción, las demás esperan su resultado en
+    // vez de lanzar una consulta propia.
+    private val inFlightFetches = ConcurrentHashMap<String, CompletableDeferred<FetchOutcome>>()
+
+    // Conjunto Letras-Atomicas-14: hasta cuándo (epoch ms) no se vuelve a consultar
+    // una canción cuyo último resultado quedó sin confirmar. Solo en memoria, nunca
+    // se persiste en Room.
+    private val unconfirmedCooldownUntil = ConcurrentHashMap<String, Long>()
 
     companion object {
         // TTL 1h para re-intentos tras un "no encontrado" (ya existía; extraído a
@@ -34,6 +59,11 @@ class LyricsRepository(private val context: Context) {
         // canción real. El umbral es deliberadamente bajo: solo necesita distinguir
         // "esto no es una letra completa" de "esto sí lo es".
         private const val MIN_PLAUSIBLE_TIMED_LINES = 3
+
+        // Conjunto Letras-Atomicas-14: espera mínima, solo en memoria, antes de volver
+        // a consultar una canción cuyo último resultado quedó sin confirmar. Evita que
+        // los disparos en ráfaga del ciclo de letras repitan la misma consulta fallida.
+        private const val UNCONFIRMED_COOLDOWN_MS = 30_000L
     }
 
     suspend fun getLyrics(trackKey: String, artist: String, title: String, durationMs: Long): LyricsResult? = withContext(Dispatchers.IO) {
@@ -70,25 +100,39 @@ class LyricsRepository(private val context: Context) {
             android.util.Log.d("LYRICS_RETRY_TRACE", "Fetch pospuesto sin duración confirmada: trackKey=$trackKey")
             return@withContext null
         }
-        val networkResult = fetchFromNetwork(artist, title, durationMs / 1000)
+
+        // Conjunto Letras-Atomicas-14: si el último resultado de esta canción quedó sin
+        // confirmar hace menos de UNCONFIRMED_COOLDOWN_MS, no se vuelve a consultar aún.
+        val cooldownEnd = unconfirmedCooldownUntil[trackKey]
+        if (cooldownEnd != null && System.currentTimeMillis() < cooldownEnd) {
+            android.util.Log.d("LYRICS_RETRY_TRACE", "Cooldown por consulta sin confirmar, sin nueva consulta: trackKey=$trackKey, msRestantes=${cooldownEnd - System.currentTimeMillis()}")
+            return@withContext null
+        }
+
+        val outcome = fetchCoalesced(trackKey, artist, title, durationMs / 1000)
         val now = System.currentTimeMillis()
-        
-        if (networkResult != null) {
-            lyricsDao.insertLyrics(
-                LyricsEntity(
-                    trackKey = trackKey,
-                    syncedLyrics = networkResult,
-                    plainLyrics = null,
-                    timestampFetched = now,
-                    lastAccessed = now,
-                    notFound = false
+
+        return@withContext when (outcome) {
+            is FetchOutcome.Found -> {
+                unconfirmedCooldownUntil.remove(trackKey)
+                lyricsDao.insertLyrics(
+                    LyricsEntity(
+                        trackKey = trackKey,
+                        syncedLyrics = outcome.lrc,
+                        plainLyrics = null,
+                        timestampFetched = now,
+                        lastAccessed = now,
+                        notFound = false
+                    )
                 )
-            )
-            return@withContext parseLrc(trackKey, networkResult, durationMs)
-        } else {
-            // Conjunto Letras-Atomicas-9: sin duración confirmada, un "no encontrado"
-            // de LRCLIB no es confiable (catálogo con casi-duplicados por duración).
-            if (durationMs > 0) {
+                parseLrc(trackKey, outcome.lrc, durationMs)
+            }
+            is FetchOutcome.NotFound -> {
+                // Conjunto Letras-Atomicas-14: solo una respuesta confirmada de LRCLIB
+                // (sin registro, sin letra sincronizada o contenido implausible) se
+                // persiste como "no encontrado". La duración ya está confirmada aquí
+                // (durationMs > 0, ver Letras-Atomicas-12 y Letras-Atomicas-9).
+                unconfirmedCooldownUntil.remove(trackKey)
                 lyricsDao.insertLyrics(
                     LyricsEntity(
                         trackKey = trackKey,
@@ -99,15 +143,45 @@ class LyricsRepository(private val context: Context) {
                         notFound = true
                     )
                 )
-            } else {
-                android.util.Log.d("LYRICS_RETRY_TRACE", "Fallo sin duración confirmada (durationMs=$durationMs): no se cachea notFound, trackKey=$trackKey")
+                null
             }
-            return@withContext null
+            is FetchOutcome.Unconfirmed -> {
+                // Conjunto Letras-Atomicas-14: rechazo de validación, error de red,
+                // timeout o código HTTP inesperado — no se persiste nada en Room.
+                unconfirmedCooldownUntil[trackKey] = now + UNCONFIRMED_COOLDOWN_MS
+                android.util.Log.d("LYRICS_RETRY_TRACE", "Consulta sin confirmar: no se cachea notFound, trackKey=$trackKey")
+                null
+            }
         }
     }
 
-    private fun normalizeForSearch(text: String): String {
-        return text.replace(Regex("\\(.*?\\)|\\[.*?\\]"), "").trim()
+    // Conjunto Letras-Atomicas-14: solo una consulta de red por trackKey a la vez. La
+    // primera llamada ejecuta la consulta; las que lleguen mientras tanto esperan su
+    // resultado. Si la primera se cancela antes de terminar, las que esperan reciben
+    // `Unconfirmed` (no `NotFound`), de modo que nada se persiste por una cancelación.
+    private suspend fun fetchCoalesced(trackKey: String, artist: String, title: String, durationSec: Long): FetchOutcome {
+        val mine = CompletableDeferred<FetchOutcome>()
+        val existing = inFlightFetches.putIfAbsent(trackKey, mine)
+        if (existing != null) {
+            android.util.Log.d("LYRICS_RETRY_TRACE", "Consulta ya en curso para esta canción, se espera su resultado: trackKey=$trackKey")
+            return existing.await()
+        }
+        try {
+            val outcome = fetchFromNetwork(artist, title, durationSec)
+            mine.complete(outcome)
+            return outcome
+        } finally {
+            if (!mine.isCompleted) mine.complete(FetchOutcome.Unconfirmed)
+            inFlightFetches.remove(trackKey, mine)
+        }
+    }
+
+    // Conjunto Letras-Atomicas-14: forma canónica usada SOLO para comparar nombres al
+    // validar la respuesta de LRCLIB — ignora mayúsculas/minúsculas y marcas
+    // diacríticas (tildes). Nunca se usa para construir la consulta que se envía.
+    private fun foldForComparison(text: String): String {
+        val decomposed = Normalizer.normalize(text.trim(), Normalizer.Form.NFD)
+        return decomposed.replace(Regex("\\p{M}+"), "").lowercase()
     }
 
     // Conjunto Letras-Atomicas-13: cuenta cuántas líneas de un bloque LRC tienen un
@@ -146,52 +220,65 @@ class LyricsRepository(private val context: Context) {
         }
     }
 
-    private suspend fun fetchFromNetwork(artist: String, title: String, durationSec: Long): String? = withContext(Dispatchers.IO) {
+    private suspend fun fetchFromNetwork(artist: String, title: String, durationSec: Long): FetchOutcome = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
-            val cleanArtist = URLEncoder.encode(normalizeForSearch(artist), "UTF-8")
-            val cleanTitle = URLEncoder.encode(normalizeForSearch(title), "UTF-8")
+            // Conjunto Letras-Atomicas-14: artista y título se envían tal como llegan,
+            // sin ninguna limpieza ni reformateo.
+            val encodedArtist = URLEncoder.encode(artist, "UTF-8")
+            val encodedTitle = URLEncoder.encode(title, "UTF-8")
             val durationParam = if (durationSec > 0) "&duration=$durationSec" else ""
-            val urlString = "https://lrclib.net/api/get?artist_name=$cleanArtist&track_name=$cleanTitle$durationParam"
-            
+            val urlString = "https://lrclib.net/api/get?artist_name=$encodedArtist&track_name=$encodedTitle$durationParam"
+
             connection = URL(urlString).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             connection.setRequestProperty("User-Agent", "MusicWidgetAndroidApp (https://github.com/arenliel/musicwidget)")
-            
-            if (connection.responseCode == 200) {
+
+            val responseCode = connection.responseCode
+            if (responseCode == 200) {
                 val response = connection.inputStream.bufferedReader().use { it.readText() }
                 val json = JSONObject(response)
                 // Conjunto Letras-Atomicas-5: LRCLIB es una base colaborativa y puede
                 // tener entradas mal etiquetadas — verificamos que lo que devuelve
                 // realmente corresponda al artista/título que pedimos antes de confiar
                 // en su contenido.
+                // Conjunto Letras-Atomicas-14: la comparación ignora mayúsculas y tildes
+                // (LRCLIB también busca sin distinguir tildes), y un rechazo aquí queda
+                // como `Unconfirmed`, no como "no encontrado".
                 val returnedTrack = json.optString("trackName")
                 val returnedArtist = json.optString("artistName")
-                val matchesRequest = normalizeForSearch(returnedTrack).equals(normalizeForSearch(title), ignoreCase = true) &&
-                    normalizeForSearch(returnedArtist).equals(normalizeForSearch(artist), ignoreCase = true)
+                val matchesRequest = foldForComparison(returnedTrack) == foldForComparison(title) &&
+                    foldForComparison(returnedArtist) == foldForComparison(artist)
                 if (!matchesRequest) {
                     Log.e("LyricsRepo", "Respuesta de LRCLIB no coincide con lo solicitado: pedido=$artist|$title, recibido=$returnedArtist|$returnedTrack")
-                    return@withContext null
+                    return@withContext FetchOutcome.Unconfirmed
                 }
                 // Conjunto Letras-Atomicas-13: metadatos correctos no garantizan
                 // contenido plausible — un bloque con muy pocas líneas cronometradas
                 // no es una letra sincronizada completa, aunque venga con la
                 // identidad correcta. Se descarta aquí, antes de persistirse.
                 val syncedLyrics = json.optString("syncedLyrics").takeIf { it.isNotBlank() }
-                if (syncedLyrics != null && !isPlausibleLyrics(syncedLyrics)) {
-                    Log.e("LyricsRepo", "Contenido descartado por implausible (menos de $MIN_PLAUSIBLE_TIMED_LINES líneas cronometradas): artista=$artist, título=$title")
-                    return@withContext null
+                if (syncedLyrics == null) {
+                    return@withContext FetchOutcome.NotFound
                 }
-                return@withContext syncedLyrics
+                if (!isPlausibleLyrics(syncedLyrics)) {
+                    Log.e("LyricsRepo", "Contenido descartado por implausible (menos de $MIN_PLAUSIBLE_TIMED_LINES líneas cronometradas): artista=$artist, título=$title")
+                    return@withContext FetchOutcome.NotFound
+                }
+                return@withContext FetchOutcome.Found(syncedLyrics)
             }
+            if (responseCode == 404) {
+                return@withContext FetchOutcome.NotFound
+            }
+            Log.e("LyricsRepo", "Respuesta inesperada de LRCLIB: código=$responseCode")
         } catch (e: Exception) {
             Log.e("LyricsRepo", "Error fetching lyrics", e)
         } finally {
             connection?.disconnect()
         }
-        null
+        FetchOutcome.Unconfirmed
     }
 
     private fun parseStoredLyrics(trackKey: String, lrc: String, durationMs: Long): LyricsResult {
@@ -202,7 +289,7 @@ class LyricsRepository(private val context: Context) {
         val allEntries = mutableListOf<LyricsEntry>()
         val lines = lrc.split("\n")
         val regex = Regex("\\[(\\d{2}):(\\d{2})\\.(\\d{2,3})\\](.*)")
-        
+
         for (line in lines) {
             val match = regex.find(line)
             if (match != null) {
