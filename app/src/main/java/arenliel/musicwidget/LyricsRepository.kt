@@ -16,7 +16,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
 
 data class LyricsEntry(val timestampMs: Long, val text: String)
@@ -65,6 +64,12 @@ class LyricsRepository(private val context: Context) {
         // consultar la fuente externa en vez de perpetuar el contenido guardado.
         private const val FOUND_TTL_MS = 30L * 24 * 60 * 60 * 1000L
 
+        // Conjunto Letras-Seleccion-1: a stored record that needed repair (LyricsTimeline had to discard
+        // lines) is looked at again after this long, so a better record that exists now can replace it
+        // without waiting for FOUND_TTL_MS. Bounded, so a record that cannot be improved is not
+        // re-fetched every time the song plays.
+        private const val DAMAGED_RETRY_MS = 1 * 60 * 60 * 1000L
+
         // Conjunto Letras-Atomicas-13: un resultado con menos líneas cronometradas
         // que este umbral no se acepta como letra sincronizada completa de una
         // canción real. El umbral es deliberadamente bajo: solo necesita distinguir
@@ -93,7 +98,14 @@ class LyricsRepository(private val context: Context) {
                 // indefinidamente. Si supera su ventana de vigencia, se trata como
                 // vencida y cae al mismo camino de re-consulta a red de más abajo, en
                 // vez de perpetuar un contenido potencialmente incorrecto para siempre.
-                if (now - cached.timestampFetched < FOUND_TTL_MS) {
+                // Conjunto Letras-Seleccion-1: a stored record that needed repair is re-fetched once
+                // DAMAGED_RETRY_MS has passed (see the constant), instead of being served until it expires.
+                val repairRetryDue = now - cached.timestampFetched >= DAMAGED_RETRY_MS &&
+                    LyricsTimeline.parse(cached.syncedLyrics ?: "").discardedCount > 0
+                if (repairRetryDue) {
+                    android.util.Log.d("LYRICS_RETRY_TRACE", "Letra guardada con lineas descartadas, re-consultando: trackKey=$trackKey, msDesdeUltimoFetch=${now - cached.timestampFetched}")
+                }
+                if (now - cached.timestampFetched < FOUND_TTL_MS && !repairRetryDue) {
                     lyricsDao.updateLastAccessed(trackKey, now)
                     return@withContext parseStoredLyrics(trackKey, cached.syncedLyrics ?: "", durationMs)
                 }
@@ -207,13 +219,11 @@ class LyricsRepository(private val context: Context) {
         fetchScope.cancel()
     }
 
-    // Conjunto Letras-Atomicas-14: forma canónica usada SOLO para comparar nombres al
-    // validar la respuesta de LRCLIB — ignora mayúsculas/minúsculas y marcas
-    // diacríticas (tildes). Nunca se usa para construir la consulta que se envía.
-    private fun foldForComparison(text: String): String {
-        val decomposed = Normalizer.normalize(text.trim(), Normalizer.Form.NFD)
-        return decomposed.replace(Regex("\\p{M}+"), "").lowercase()
-    }
+    // Conjunto Letras-Atomicas-14 / Letras-Seleccion-1: canonical form used ONLY to compare names when
+    // validating LRCLIB's answer (ignores case and diacritics). The single definition lives in
+    // LyricsCandidatePicker.fold, shared with the candidate selection. Never used to build the
+    // query that is sent.
+    private fun foldForComparison(text: String): String = LyricsCandidatePicker.fold(text)
 
     // Conjunto Letras-Atomicas-13: cuenta cuántas líneas de un bloque LRC tienen un
     // timestamp válido (`[mm:ss.xx]`). Es la señal de forma usada por
@@ -251,7 +261,79 @@ class LyricsRepository(private val context: Context) {
         }
     }
 
-    private suspend fun fetchFromNetwork(artist: String, title: String, durationSec: Long): FetchOutcome = withContext(Dispatchers.IO) {
+    // Conjunto Letras-Seleccion-1: the direct lookup (/api/get) returns ONE record and we do not
+    // control which. When that record comes with a damaged timeline (LyricsTimeline.parse has to
+    // discard lines), the search endpoint is asked for all the records of the song and
+    // LyricsCandidatePicker chooses a clean one. If the search finds nothing acceptable, or fails,
+    // the direct result stands exactly as it was before this set. Any other direct outcome (clean
+    // record, not found, unconfirmed) is returned untouched, with no extra request.
+    private suspend fun fetchFromNetwork(artist: String, title: String, durationSec: Long): FetchOutcome {
+        val direct = fetchDirect(artist, title, durationSec)
+        if (direct !is FetchOutcome.Found) return direct
+        if (LyricsTimeline.parse(direct.lrc).discardedCount == 0) return direct
+
+        Log.d("LYRICS_RETRY_TRACE", "Consulta alternativa: motivo=registro_danado, pedido=$artist|$title")
+        val alternativeLrc = searchAlternative(artist, title, durationSec)?.syncedLyrics ?: return direct
+        return FetchOutcome.Found(alternativeLrc)
+    }
+
+    // Conjunto Letras-Seleccion-1: asks LRCLIB's search endpoint for every record of the song and
+    // lets LyricsCandidatePicker choose one. Returns null when nothing acceptable was found or the
+    // request failed; the caller then keeps the direct result.
+    private suspend fun searchAlternative(artist: String, title: String, durationSec: Long): LyricsCandidate? = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
+        try {
+            val encodedArtist = URLEncoder.encode(artist, "UTF-8")
+            val encodedTitle = URLEncoder.encode(title, "UTF-8")
+            val urlString = "https://lrclib.net/api/search?artist_name=$encodedArtist&track_name=$encodedTitle"
+
+            connection = URL(urlString).openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            connection.setRequestProperty("User-Agent", "MusicWidgetAndroidApp (https://github.com/arenliel/musicwidget)")
+
+            val responseCode = connection.responseCode
+            if (responseCode != 200) {
+                Log.d("LYRICS_RETRY_TRACE", "Consulta alternativa sin resultado: motivo=http_$responseCode, pedido=$artist|$title")
+                return@withContext null
+            }
+            val response = connection.inputStream.bufferedReader().use { it.readText() }
+            val array = JSONArray(response)
+            val candidates = ArrayList<LyricsCandidate>(array.length())
+            for (i in 0 until array.length()) {
+                val item = array.optJSONObject(i) ?: continue
+                candidates.add(
+                    LyricsCandidate(
+                        id = item.optLong("id"),
+                        trackName = item.optString("trackName"),
+                        artistName = item.optString("artistName"),
+                        durationSec = item.optDouble("duration", -1.0),
+                        syncedLyrics = if (item.isNull("syncedLyrics")) null else item.optString("syncedLyrics")
+                    )
+                )
+            }
+            val picked = LyricsCandidatePicker.pick(candidates, artist, title, durationSec, MIN_PLAUSIBLE_TIMED_LINES)
+            if (picked == null) {
+                Log.d("LYRICS_RETRY_TRACE", "Consulta alternativa: ningun candidato valido, candidatos=${candidates.size}, pedido=$artist|$title")
+            } else {
+                Log.d("LYRICS_RETRY_TRACE", "Consulta alternativa: elegido id=${picked.id}, duracion=${picked.durationSec}, candidatos=${candidates.size}, pedido=$artist|$title")
+            }
+            picked
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("LyricsRepo", "Error en la consulta alternativa de letras", e)
+            Log.d("LYRICS_RETRY_TRACE", "Consulta alternativa sin resultado: motivo=excepcion_${e.javaClass.simpleName}, pedido=$artist|$title")
+            null
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    // Conjunto Letras-Atomicas-5 / Letras-Seleccion-1: the direct lookup, unchanged; it was
+    // previously named fetchFromNetwork.
+    private suspend fun fetchDirect(artist: String, title: String, durationSec: Long): FetchOutcome = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
             // Conjunto Letras-Atomicas-14: artista y título se envían tal como llegan,
