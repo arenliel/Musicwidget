@@ -473,8 +473,12 @@ class MusicNotificationListener : NotificationListenerService() {
                     if (liveState != null) {
                         val stateDiverged = liveState.state != lastSnapshot.playbackState
                         val expectedPos = lastSnapshot.projectedPositionMs()
-                        val actualPos = liveState.position
-                        val positionDiverged = Math.abs(expectedPos - actualPos) > RECONCILE_POSITION_TOLERANCE_MS
+                        // Conjunto Letras-Robustez-1: PlaybackState.position es la posición EN el
+                        // instante lastPositionUpdateTime, no la de ahora. Se extrapola con la misma
+                        // fórmula con la que se proyecta el snapshot; una posición desconocida (-1)
+                        // no cuenta como divergencia.
+                        val actualPos = extrapolatedPositionMs(liveState, lastSnapshot.durationMs)
+                        val positionDiverged = actualPos >= 0L && Math.abs(expectedPos - actualPos) > RECONCILE_POSITION_TOLERANCE_MS
                         if (stateDiverged || positionDiverged) {
                             InternalLogger.d(applicationContext, "[RECONCILE_TRACE] Divergencia detectada: estadoWidget=${lastSnapshot.playbackState}, estadoReal=${liveState.state}, posEsperada=${expectedPos}ms, posReal=${actualPos}ms")
                             requestRefresh(fast = true, reason = "reconciliation_poll")
@@ -495,6 +499,22 @@ class MusicNotificationListener : NotificationListenerService() {
                 }
             }
         }
+    }
+
+    // Conjunto Letras-Robustez-1: posición de reproducción de un PlaybackState EN ESTE INSTANTE.
+    // PlaybackState.position es la posición en lastPositionUpdateTime; mientras se reproduce hay que
+    // sumarle el tiempo transcurrido (por la velocidad), igual que MediaSnapshot.projectedPositionMs.
+    // Devuelve la posición cruda si es desconocida (negativa) o si no se está reproduciendo.
+    private fun extrapolatedPositionMs(
+        state: PlaybackState,
+        durationMs: Long,
+        nowRealtime: Long = SystemClock.elapsedRealtime()
+    ): Long {
+        val raw = state.position
+        if (raw < 0L || state.state != PlaybackState.STATE_PLAYING) return raw
+        val elapsed = (nowRealtime - state.lastPositionUpdateTime).coerceAtLeast(0L)
+        val projected = raw + (elapsed * state.playbackSpeed).toLong()
+        return if (durationMs > 0L) projected.coerceIn(0L, durationMs) else projected
     }
 
     private fun isWidgetPotentiallyVisible(): Boolean {
@@ -792,9 +812,20 @@ class MusicNotificationListener : NotificationListenerService() {
                     val processingLag = now - detectedAt
                     InternalLogger.d(applicationContext, "[LYRICS_TRACE] Aplicando Seek (Lag compensado: ${processingLag}ms): ${position + processingLag}ms")
                     
+                    // Conjunto Letras-Robustez-1: un seek solo aplica a la sesión sobre la que se
+                    // detectó. Si la canción cambió mientras se agrupaba la ráfaga (al cambiar de pista
+                    // la posición salta a 0 y parece un seek), se descarta.
+                    if (currentLogicalSession?.sessionIdentity != snapshot.sessionIdentity) {
+                        InternalLogger.d(applicationContext, "[LYRICS_TRACE] Seek descartado: la sesión cambió mientras se agrupaba la ráfaga.")
+                        return@collect
+                    }
+                    // Conjunto Letras-Robustez-1: el ancla de tiempo de la posición también es "ahora".
+                    // Sin esto, projectedPositionMs() seguía sumando el tiempo transcurrido desde el
+                    // ancla del snapshot VIEJO y el seek no corregía nada.
                     val updatedSnapshot = snapshot.copy(
                         positionMs = position + processingLag,
-                        observedAtRealtime = now
+                        observedAtRealtime = now,
+                        positionUpdatedAtRealtime = now
                     )
                     lastLogicalSnapshot = updatedSnapshot
                     // Conjunto Controles-Posicion-1: el seek también mueve la barra de progreso.
@@ -2186,7 +2217,18 @@ class MusicNotificationListener : NotificationListenerService() {
         // recomputed, and without touching `trackContentChanged`'s own correct meaning for its
         // other uses elsewhere in this function.
         // Bloqueamos ráfagas antes de entrar al Mutex o realizar cálculos analíticos.
-        if (!isCatchUp && !trackContentChanged && !durationJustConfirmed && !sessionChanged && !artIncoherent && 
+        // Conjunto Letras-Robustez-1: "idéntico" incluye la posición. Un snapshot cuya posición real
+        // difiere de la que el widget proyecta (rebobinado, avance, loop) NO es un duplicado aunque
+        // estado, pista y portada coincidan; descartarlo dejaba al reloj interno (y a la letra)
+        // desfasados hasta la siguiente pausa. Misma tolerancia que el sondeo de reconciliación.
+        val modelPositionMs = previousLogical?.projectedPositionMs()
+        val snapshotPositionMs = rawSnapshot.projectedPositionMs()
+        val positionDiverged = modelPositionMs != null &&
+            Math.abs(snapshotPositionMs - modelPositionMs) > RECONCILE_POSITION_TOLERANCE_MS
+        if (positionDiverged) {
+            InternalLogger.d(applicationContext, "[SEEK_TRACE] Posición divergente en snapshot: modelo=${modelPositionMs}ms, snapshot=${snapshotPositionMs}ms, reason=$reason")
+        }
+        if (!isCatchUp && !trackContentChanged && !durationJustConfirmed && !sessionChanged && !artIncoherent && !positionDiverged && 
             currentMem.isPlaying == (rawSnapshot.playbackState == PlaybackState.STATE_PLAYING) && 
             currentMem.isSessionActive == rawSnapshot.isSessionActive) {
             
@@ -2730,7 +2772,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     // consultar, en vez de usar el snapshot capturado antes del debounce —
                     // la duración pudo resolverse recién durante esta espera.
                     val freshInfo = MusicStateProvider.current()
-                    val result = lyricsRepository.getLyrics(freshInfo.trackKey, freshInfo.artist, freshInfo.title, freshInfo.durationMs)
+                    val result = lyricsRepository.getLyrics(lyricsCacheKey(freshInfo), freshInfo.artist, freshInfo.title, freshInfo.durationMs)
                     if (result != null && isActive) {
                         currentLyrics = result
                         currentLyricsIdentity = MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist)
@@ -2967,6 +3009,13 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
+    // Conjunto Letras-Robustez-1: llave de caché y de consulta de letras. MusicInfo.trackKey es la
+    // identidad física CONGELADA al nacer la sesión (puede terminar en |-1 si la duración aún no se
+    // conocía) y puede contradecir a MusicInfo.durationMs. La letra se consulta con la duración
+    // actual, así que su llave debe construirse con esa misma duración: sessionIdentity|durationMs.
+    private fun lyricsCacheKey(info: MusicInfo): String =
+        "${MusicDataStore.computeSessionIdentity(info.packageName, info.title, info.artist)}|${info.durationMs}"
+
     private fun relaunchLyricsTicker(reason: String) {
         InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] relaunchLyricsTicker invocado: reason=$reason, currentLyricsEsNull=${currentLyrics == null}")
         if (!isWidgetPotentiallyVisible()) {
@@ -3007,7 +3056,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     cachedLyrics
                 } else {
                     lyricsRepository.getLyrics(
-                        currentInfo.trackKey, currentInfo.artist, currentInfo.title, currentInfo.durationMs
+                        lyricsCacheKey(currentInfo), currentInfo.artist, currentInfo.title, currentInfo.durationMs
                     )?.also {
                         currentLyrics = it
                         currentLyricsIdentity = targetIdentity
@@ -3041,13 +3090,15 @@ class MusicNotificationListener : NotificationListenerService() {
             val snapshot = lastLogicalSnapshot ?: break
             val currentPos = snapshot.projectedPositionMs()
             
-            val entry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= (currentPos + snappinessOffset) }
+            // Conjunto Letras-Robustez-1: línea vigente por búsqueda sobre la línea de tiempo ya
+            // saneada (LyricsTimeline.indexAt), sin indexOf por igualdad de datos.
+            val entryIdx = LyricsTimeline.indexAt(lyricsRes.allEntries, currentPos + snappinessOffset)
+            val entry = if (entryIdx != -1) lyricsRes.allEntries[entryIdx] else null
             
             if (entry != null) {
                 updateLyricInWidget(myTrackKey, entry.text)
             }
 
-            val entryIdx = lyricsRes.allEntries.indexOf(entry)
             val next = if (entryIdx != -1 && entryIdx < lyricsRes.allEntries.size - 1) lyricsRes.allEntries[entryIdx + 1] else null
             
             // Hallazgo v4.1: Regla Unificada de Silencio (Conjunto Letras-2)
@@ -3112,7 +3163,7 @@ class MusicNotificationListener : NotificationListenerService() {
             
             val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
             
-            var lastEntry = lyricsRes.allEntries.lastOrNull { it.timestampMs <= pausedPos }
+            var lastEntry = lyricsRes.allEntries.getOrNull(LyricsTimeline.indexAt(lyricsRes.allEntries, pausedPos))
             val fallbackFired = lastEntry == null && pausedPos < 5000L && currentLogicalSession?.hasConfirmedPlayback == true
             // Conjunto Letras-Atomicas-8: antes, esta regla también se disparaba durante
             // Estado=OTHER (carga), mostrando la primera línea antes de que sonara audio.
@@ -3710,6 +3761,7 @@ class MusicNotificationListener : NotificationListenerService() {
         artworkCache.evictAll()
         lyricsUpdateJob?.cancel()
         lyricsFetchJob?.cancel()
+        if (::lyricsRepository.isInitialized) lyricsRepository.shutdown()
         progressTickJob?.cancel()
         PlaybackClock.clear()
         Log.d(TAG, "[DIAGNOSTIC] SERVICE_LIFECYCLE: onDestroy - Process ending")

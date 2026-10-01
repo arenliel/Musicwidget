@@ -2,8 +2,13 @@ package arenliel.musicwidget
 
 import android.content.Context
 import android.util.Log
-import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,10 +37,16 @@ class LyricsRepository(private val context: Context) {
         object Unconfirmed : FetchOutcome()
     }
 
-    // Conjunto Letras-Atomicas-14: consultas de red en curso, por trackKey. Si ya hay
-    // una consulta en curso para la misma canción, las demás esperan su resultado en
+    // Conjunto Letras-Robustez-1: ámbito PROPIO del repositorio para las consultas de red. Una
+    // consulta compartida ya no pertenece a quien la pidió primero: si ese llamador se cancela
+    // (el ciclo de letras se relanza varias veces en ráfaga al cambiar de canción), la consulta
+    // sigue hasta terminar y guarda su resultado; los demás llamadores reciben el resultado real.
+    private val fetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // Conjunto Letras-Atomicas-14 / Letras-Robustez-1: consultas de red en curso, por trackKey.
+    // Si ya hay una consulta en curso para la misma canción, las demás esperan su resultado en
     // vez de lanzar una consulta propia.
-    private val inFlightFetches = ConcurrentHashMap<String, CompletableDeferred<FetchOutcome>>()
+    private val inFlightFetches = ConcurrentHashMap<String, Deferred<FetchOutcome>>()
 
     // Conjunto Letras-Atomicas-14: hasta cuándo (epoch ms) no se vuelve a consultar
     // una canción cuyo último resultado quedó sin confirmar. Solo en memoria, nunca
@@ -109,10 +120,54 @@ class LyricsRepository(private val context: Context) {
             return@withContext null
         }
 
-        val outcome = fetchCoalesced(trackKey, artist, title, durationMs / 1000)
-        val now = System.currentTimeMillis()
+        return@withContext when (val outcome = fetchCoalesced(trackKey, artist, title, durationMs / 1000)) {
+            is FetchOutcome.Found -> parseLrc(trackKey, outcome.lrc, durationMs)
+            // Conjunto Letras-Robustez-1: la persistencia (Room) y el cooldown los realiza la propia
+            // consulta compartida (ver persistOutcome), no cada llamador.
+            is FetchOutcome.NotFound -> null
+            is FetchOutcome.Unconfirmed -> null
+        }
+    }
 
-        return@withContext when (outcome) {
+    // Conjunto Letras-Robustez-1: solo una consulta de red por trackKey a la vez, y esa consulta es
+    // del repositorio, no del llamador que la pidió primero. La consulta corre en `fetchScope` y
+    // guarda su propio resultado al terminar (persistOutcome); quien la pide solo espera. Si un
+    // llamador se cancela mientras espera (el ciclo de letras se relanza en ráfaga), se cancela
+    // únicamente su espera: la consulta continúa y los demás reciben su resultado real. Una
+    // cancelación nunca se traduce en `Unconfirmed`.
+    private suspend fun fetchCoalesced(trackKey: String, artist: String, title: String, durationSec: Long): FetchOutcome {
+        val candidate = fetchScope.async(start = CoroutineStart.LAZY) {
+            val outcome = fetchFromNetwork(artist, title, durationSec)
+            try {
+                persistOutcome(trackKey, outcome)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("LyricsRepo", "Error guardando el resultado de la consulta de letras", e)
+            }
+            outcome
+        }
+        val existing = inFlightFetches.putIfAbsent(trackKey, candidate)
+        val shared: Deferred<FetchOutcome>
+        if (existing != null) {
+            candidate.cancel()
+            android.util.Log.d("LYRICS_RETRY_TRACE", "Consulta ya en curso para esta canción, se espera su resultado: trackKey=$trackKey")
+            shared = existing
+        } else {
+            candidate.invokeOnCompletion { inFlightFetches.remove(trackKey, candidate) }
+            shared = candidate
+        }
+        shared.start()
+        return shared.await()
+    }
+
+    // Conjunto Letras-Robustez-1: guarda el resultado de una consulta de red. Solo un `NotFound`
+    // confirmado se persiste como "no encontrado" (Letras-Atomicas-14); un `Unconfirmed` no
+    // persiste nada y activa el cooldown en memoria. Se ejecuta dentro de la propia consulta
+    // compartida, una sola vez por consulta, sin depender de que algún llamador siga vivo.
+    private suspend fun persistOutcome(trackKey: String, outcome: FetchOutcome) {
+        val now = System.currentTimeMillis()
+        when (outcome) {
             is FetchOutcome.Found -> {
                 unconfirmedCooldownUntil.remove(trackKey)
                 lyricsDao.insertLyrics(
@@ -125,13 +180,8 @@ class LyricsRepository(private val context: Context) {
                         notFound = false
                     )
                 )
-                parseLrc(trackKey, outcome.lrc, durationMs)
             }
             is FetchOutcome.NotFound -> {
-                // Conjunto Letras-Atomicas-14: solo una respuesta confirmada de LRCLIB
-                // (sin registro, sin letra sincronizada o contenido implausible) se
-                // persiste como "no encontrado". La duración ya está confirmada aquí
-                // (durationMs > 0, ver Letras-Atomicas-12 y Letras-Atomicas-9).
                 unconfirmedCooldownUntil.remove(trackKey)
                 lyricsDao.insertLyrics(
                     LyricsEntity(
@@ -143,37 +193,18 @@ class LyricsRepository(private val context: Context) {
                         notFound = true
                     )
                 )
-                null
             }
             is FetchOutcome.Unconfirmed -> {
-                // Conjunto Letras-Atomicas-14: rechazo de validación, error de red,
-                // timeout o código HTTP inesperado — no se persiste nada en Room.
                 unconfirmedCooldownUntil[trackKey] = now + UNCONFIRMED_COOLDOWN_MS
                 android.util.Log.d("LYRICS_RETRY_TRACE", "Consulta sin confirmar: no se cachea notFound, trackKey=$trackKey")
-                null
             }
         }
     }
 
-    // Conjunto Letras-Atomicas-14: solo una consulta de red por trackKey a la vez. La
-    // primera llamada ejecuta la consulta; las que lleguen mientras tanto esperan su
-    // resultado. Si la primera se cancela antes de terminar, las que esperan reciben
-    // `Unconfirmed` (no `NotFound`), de modo que nada se persiste por una cancelación.
-    private suspend fun fetchCoalesced(trackKey: String, artist: String, title: String, durationSec: Long): FetchOutcome {
-        val mine = CompletableDeferred<FetchOutcome>()
-        val existing = inFlightFetches.putIfAbsent(trackKey, mine)
-        if (existing != null) {
-            android.util.Log.d("LYRICS_RETRY_TRACE", "Consulta ya en curso para esta canción, se espera su resultado: trackKey=$trackKey")
-            return existing.await()
-        }
-        try {
-            val outcome = fetchFromNetwork(artist, title, durationSec)
-            mine.complete(outcome)
-            return outcome
-        } finally {
-            if (!mine.isCompleted) mine.complete(FetchOutcome.Unconfirmed)
-            inFlightFetches.remove(trackKey, mine)
-        }
+    // Conjunto Letras-Robustez-1: cierra el ámbito de consultas de red. Se invoca al destruirse
+    // el servicio.
+    fun shutdown() {
+        fetchScope.cancel()
     }
 
     // Conjunto Letras-Atomicas-14: forma canónica usada SOLO para comparar nombres al
@@ -253,6 +284,7 @@ class LyricsRepository(private val context: Context) {
                     foldForComparison(returnedArtist) == foldForComparison(artist)
                 if (!matchesRequest) {
                     Log.e("LyricsRepo", "Respuesta de LRCLIB no coincide con lo solicitado: pedido=$artist|$title, recibido=$returnedArtist|$returnedTrack")
+                    Log.d("LYRICS_RETRY_TRACE", "Sin confirmar: motivo=identidad_no_coincide, pedido=$artist|$title, recibido=$returnedArtist|$returnedTrack")
                     return@withContext FetchOutcome.Unconfirmed
                 }
                 // Conjunto Letras-Atomicas-13: metadatos correctos no garantizan
@@ -273,8 +305,10 @@ class LyricsRepository(private val context: Context) {
                 return@withContext FetchOutcome.NotFound
             }
             Log.e("LyricsRepo", "Respuesta inesperada de LRCLIB: código=$responseCode")
+            Log.d("LYRICS_RETRY_TRACE", "Sin confirmar: motivo=http_$responseCode, trackName=$title")
         } catch (e: Exception) {
             Log.e("LyricsRepo", "Error fetching lyrics", e)
+            Log.d("LYRICS_RETRY_TRACE", "Sin confirmar: motivo=excepcion_${e.javaClass.simpleName}, trackName=$title")
         } finally {
             connection?.disconnect()
         }
@@ -286,23 +320,12 @@ class LyricsRepository(private val context: Context) {
     }
 
     fun parseLrc(trackKey: String, lrc: String, durationMs: Long): LyricsResult {
-        val allEntries = mutableListOf<LyricsEntry>()
-        val lines = lrc.split("\n")
-        val regex = Regex("\\[(\\d{2}):(\\d{2})\\.(\\d{2,3})\\](.*)")
-
-        for (line in lines) {
-            val match = regex.find(line)
-            if (match != null) {
-                val min = match.groupValues[1].toLong()
-                val sec = match.groupValues[2].toLong()
-                val msPart = match.groupValues[3]
-                val ms = if (msPart.length == 2) msPart.toLong() * 10 else msPart.toLong()
-                val totalMs = (min * 60 + sec) * 1000 + ms
-                val text = match.groupValues[4].trim()
-                if (text.isNotBlank()) allEntries.add(LyricsEntry(totalMs, text))
-            }
+        // Conjunto Letras-Robustez-1: la interpretación del LRC y la garantía de línea de tiempo
+        // coherente viven en LyricsTimeline (lógica pura, con pruebas unitarias).
+        val parsed = LyricsTimeline.parse(lrc)
+        if (parsed.discardedCount > 0) {
+            android.util.Log.d("LYRICS_RETRY_TRACE", "LRC saneado: lineasDescartadas=${parsed.discardedCount}, lineasConservadas=${parsed.entries.size}, trackKey=$trackKey")
         }
-
-        return LyricsResult(trackKey, allEntries)
+        return LyricsResult(trackKey, parsed.entries)
     }
 }
