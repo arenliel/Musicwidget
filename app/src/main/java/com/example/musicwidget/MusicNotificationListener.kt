@@ -241,13 +241,15 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
-    private var currentLyrics: LyricsResult? = null
-    // Conjunto Letras-Atomicas-2: identidad de negocio (sessionIdentity, SIN duración) con la
-    // que se obtuvo `currentLyrics`. Es la única llave válida para decidir si se puede reutilizar
-    // sin volver a golpear red/disco. Nunca comparar por trackKey (incluye duración, cambia con
-    // refinamientos tardíos) ni por un simple null-check (eso fue exactamente el bug: decía
-    // "tengo letra cargada" sin decir de qué canción era).
-    private var currentLyricsIdentity: String? = null
+    // Conjunto Letras-Unificacion-1: the lyrics loaded for the song that is playing, together with the
+    // business identity they were loaded for (sessionIdentity, never trackKey: trackKey includes the
+    // duration, which changes with late refinements). It is ONE immutable object published through ONE
+    // volatile reference, so a reader can never see the lyrics of one song paired with the identity of
+    // another, and "do I already have the right lyrics?" has a single answer.
+    private data class LoadedLyrics(val identity: String, val lyrics: LyricsResult)
+
+    @Volatile
+    private var loadedLyrics: LoadedLyrics? = null
     private var lyricsUpdateJob: Job? = null
     private val lyricsLock = Any()
     private var lyricsFetchJob: Job? = null
@@ -788,7 +790,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
 
                     // Hallazgo v3.5: Recuperación proactiva del Ticker al despertar (ACTION_USER_PRESENT indirecto)
-                    if (lyricsUpdateJob?.isActive != true && currentLyrics != null) {
+                    if (lyricsUpdateJob?.isActive != true && loadedLyrics != null) {
                         relaunchLyricsTicker("screen_wake")
                     }
 
@@ -2757,8 +2759,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 InternalLogger.d(applicationContext, "[LYRICS_TRACE] Cambio de track detectado. Reiniciando sesión.")
                 lyricsUpdateJob?.cancel()
                 lyricsFetchJob?.cancel()
-                currentLyrics = null
-                currentLyricsIdentity = null
+                loadedLyrics = null
 
                 // Conjunto Letras-Atomicas-1: se lanza en el espacio de trabajo de la sesión
                 // recién creada (currentLogicalSession ya es la nueva en este punto de la
@@ -2772,10 +2773,8 @@ class MusicNotificationListener : NotificationListenerService() {
                     // consultar, en vez de usar el snapshot capturado antes del debounce —
                     // la duración pudo resolverse recién durante esta espera.
                     val freshInfo = MusicStateProvider.current()
-                    val result = lyricsRepository.getLyrics(lyricsCacheKey(freshInfo), freshInfo.artist, freshInfo.title, freshInfo.durationMs)
-                    if (result != null && isActive) {
-                        currentLyrics = result
-                        currentLyricsIdentity = MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist)
+                    val loaded = resolveLyrics(freshInfo)
+                    if (loaded != null && isActive) {
                         relaunchLyricsTicker("identity_change")
                     } else if (isActive && freshInfo.durationMs > 0L) {
                         // PUNTO E: Fallback Silencioso - Si falla la API, limpiamos el widget
@@ -2787,22 +2786,19 @@ class MusicNotificationListener : NotificationListenerService() {
                         // confirmar su duración. En ese caso no se toca el widget: los Cambios 1-5
                         // garantizan el reintento en cuanto la duración se confirme.
                         InternalLogger.d(applicationContext, "[LYRICS_TRACE] Fallback Silencioso: No se encontraron letras.")
-                        updateLyricInWidget(MusicDataStore.computeSessionIdentity(freshInfo.packageName, freshInfo.title, freshInfo.artist), "")
+                        updateLyricInWidget(freshInfo.sessionIdentity, "")
                     }
                 }
             } else {
-                // Conjunto Letras-Atomicas-2: eliminamos la antigua rama "trackChangedUI" — nunca
-                // pudo ejecutarse (trackChangedUI y songChangedForLyrics eran exactamente la misma
-                // fórmula, así que si songChangedForLyrics ya dio false, trackChangedUI también).
-                // La decisión de reutilizar la letra ya cargada en vez de re-buscarla ahora vive
-                // centralizada dentro de relaunchLyricsTicker (ver Cambio 3) — no repartida aquí.
-                // Cualquier evento que no sea un cambio real de canción entra a este único camino.
-                InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Entrando a sincronización pasiva: currentLyricsEsNull=${currentLyrics == null}, trackKey=${snapshot.trackKey}, durationMs=${snapshot.durationMs}")
+                // Conjunto Letras-Atomicas-2 / Letras-Unificacion-1: any event that is not a real song
+                // change takes this single path. Whether the lyrics already loaded can be reused or
+                // must be loaded again is decided in exactly one place: resolveLyrics.
+                InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Entrando a sincronización pasiva: currentLyricsEsNull=${loadedLyrics == null}, trackKey=${snapshot.trackKey}, durationMs=${snapshot.durationMs}")
 
                 val effectivePos = previousLogical?.projectedPositionMs() ?: 0L
                 val drift = Math.abs(effectivePos - snapshot.projectedPositionMs())
 
-                InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Pre-shouldResync: stateChangedUI=$stateChangedUI, drift=$drift, tickerActivo=${lyricsUpdateJob?.isActive}, currentLyricsEsNull=${currentLyrics == null}")
+                InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Pre-shouldResync: stateChangedUI=$stateChangedUI, drift=$drift, tickerActivo=${lyricsUpdateJob?.isActive}, currentLyricsEsNull=${loadedLyrics == null}")
                 val shouldResync = stateChangedUI || drift > 1500L || lyricsUpdateJob?.isActive != true
 
                 if (shouldResync) {
@@ -3014,10 +3010,10 @@ class MusicNotificationListener : NotificationListenerService() {
     // conocía) y puede contradecir a MusicInfo.durationMs. La letra se consulta con la duración
     // actual, así que su llave debe construirse con esa misma duración: sessionIdentity|durationMs.
     private fun lyricsCacheKey(info: MusicInfo): String =
-        "${MusicDataStore.computeSessionIdentity(info.packageName, info.title, info.artist)}|${info.durationMs}"
+        "${info.sessionIdentity}|${info.durationMs}"
 
     private fun relaunchLyricsTicker(reason: String) {
-        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] relaunchLyricsTicker invocado: reason=$reason, currentLyricsEsNull=${currentLyrics == null}")
+        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] relaunchLyricsTicker invocado: reason=$reason, currentLyricsEsNull=${loadedLyrics == null}")
         if (!isWidgetPotentiallyVisible()) {
             synchronized(lyricsLock) {
                 lyricsUpdateJob?.cancel()
@@ -3035,33 +3031,17 @@ class MusicNotificationListener : NotificationListenerService() {
 
         val activeSession = currentLogicalSession ?: return
 
-        // Conjunto Letras-Atomicas-2: identidad de negocio de lo que suena AHORA. Es la única
-        // llave que decide si podemos reutilizar `currentLyrics` sin tocar red/disco. Capturamos
-        // ambos valores aquí (fuera de la corrutina) para no leer variables de clase que puedan
-        // cambiar mientras la corrutina está suspendida.
-        val targetIdentity = MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
-        val cachedLyrics = currentLyrics
-        val canReuse = cachedLyrics != null && currentLyricsIdentity == targetIdentity
-        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Decisión de datos: reused=$canReuse, targetIdentity=$targetIdentity, cachedIdentity=$currentLyricsIdentity")
+        // Business identity of what is playing NOW. Captured here, outside the coroutine, so it
+        // cannot change while the coroutine is suspended.
+        val targetIdentity = currentInfo.sessionIdentity
 
         synchronized(lyricsLock) {
             lyricsUpdateJob?.cancel()
             lyricsUpdateJob = activeSession.lyricsScope.launch {
-                val lyricsRes = if (canReuse && cachedLyrics != null) {
-                    // Ya tenemos la letra correcta para esta identidad exacta: nos ahorramos el
-                    // viaje a disco/red. Esto es lo que vuelve inofensivo que varios disparadores
-                    // (Stage 1, sincronización pasiva, screen_wake, seek_event) llamen a esta
-                    // función casi al mismo tiempo para el mismo evento — todos convergen aquí sin
-                    // competir por una descarga lenta que terminan cancelándose entre sí.
-                    cachedLyrics
-                } else {
-                    lyricsRepository.getLyrics(
-                        lyricsCacheKey(currentInfo), currentInfo.artist, currentInfo.title, currentInfo.durationMs
-                    )?.also {
-                        currentLyrics = it
-                        currentLyricsIdentity = targetIdentity
-                    } ?: return@launch
-                }
+                // Conjunto Letras-Unificacion-1: reuse or load, decided in one place. Every trigger
+                // (Stage 1, passive sync, screen_wake, seek_event) converges there, so they can fire
+                // almost at the same time for the same event without competing for a slow download.
+                val lyricsRes = resolveLyrics(currentInfo)?.lyrics ?: return@launch
                 if (currentInfo.isPlaying) {
                     runLyricsShowcase(targetIdentity, lyricsRes)
                 } else {
@@ -3069,6 +3049,25 @@ class MusicNotificationListener : NotificationListenerService() {
                 }
             }
         }
+    }
+
+    // Conjunto Letras-Unificacion-1: the ONE place that answers "which lyrics belong to this song?".
+    // If the lyrics already loaded were loaded for this exact song (business identity), they are
+    // reused without touching disk or network. Otherwise the repository is asked (disk cache, then
+    // network, with its own shared in-flight request) and the answer is published in loadedLyrics.
+    // Returns null when there are no lyrics (yet): not found, duration not confirmed, or the
+    // request failed; the callers keep their own handling of that case.
+    private suspend fun resolveLyrics(info: MusicInfo): LoadedLyrics? {
+        val identity = info.sessionIdentity
+        val cached = loadedLyrics
+        val canReuse = cached != null && cached.identity == identity
+        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Decisión de datos: reused=$canReuse, targetIdentity=$identity, cachedIdentity=${cached?.identity}")
+        if (canReuse) return cached
+
+        val result = lyricsRepository.getLyrics(lyricsCacheKey(info), info.artist, info.title, info.durationMs) ?: return null
+        // The song may have ended while the answer was in flight: a cancelled caller must not publish.
+        if (!currentCoroutineContext().isActive) return null
+        return LoadedLyrics(identity, result).also { loadedLyrics = it }
     }
 
     // Conjunto Letras-Motor-Puro-1: this loop no longer decides WHAT to show. That decision lives in
@@ -3088,7 +3087,7 @@ class MusicNotificationListener : NotificationListenerService() {
             val currentRAM = MusicStateProvider.current()
             // DUAL IDENTITY RULE: if the physical session (Karaoke) changed, abort.
             val oldZombieCheck = currentRAM.trackKey != myTrackKey
-            val newZombieCheck = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist) != myTrackKey
+            val newZombieCheck = currentRAM.sessionIdentity != myTrackKey
             InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_zombieDetector: viejo=$oldZombieCheck, nuevo=$newZombieCheck, coincide=${oldZombieCheck == newZombieCheck}")
             if (newZombieCheck || !currentRAM.isPlaying) {
                 InternalLogger.d(applicationContext, "[LYRICS_TRACE] Zombie Detector: Clave discordante. Cancelando Ticker.")
@@ -3125,7 +3124,7 @@ class MusicNotificationListener : NotificationListenerService() {
             // (the real isPlaying) arrives within that margin.
             delay(300L)
             val currentRAM = MusicStateProvider.current()
-            val currentSessionId = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist)
+            val currentSessionId = currentRAM.sessionIdentity
             if (currentSessionId != myTrackKey || currentRAM.isPlaying) break
 
             val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
