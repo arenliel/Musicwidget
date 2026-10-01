@@ -3071,12 +3071,22 @@ class MusicNotificationListener : NotificationListenerService() {
         }
     }
 
+    // Conjunto Letras-Motor-Puro-1: this loop no longer decides WHAT to show. That decision lives in
+    // LyricsDisplayRules.playing (a pure function of the lyrics and the playback position, with unit
+    // tests). The loop only (1) guards the song identity, (2) asks the rules for the frame at the
+    // current position, (3) writes it to the widget and (4) sleeps until that frame will change.
+    // Because the frame is derived from the position every time, a seek, a restart ("previous
+    // track"), a long instrumental or a screen wake-up cannot leave a stale line on screen.
+    // Rules that used to be spread over this loop now live in LyricsDisplayRules: the wait for the
+    // first line instead of stopping (Letras-Atomicas-4), the single silence threshold (Letras-2)
+    // and the 500 ms lead.
     private suspend fun runLyricsShowcase(myTrackKey: String, lyricsRes: LyricsResult) {
-        val snappinessOffset = 500L
+        // No lyric lines: nothing to show and nothing to schedule.
+        if (lyricsRes.allEntries.isEmpty()) return
 
         while (currentCoroutineContext().isActive) {
             val currentRAM = MusicStateProvider.current()
-            // REGLA DE IDENTIDAD DUAL: Si la sesión física (Karaoke) cambió, abortamos
+            // DUAL IDENTITY RULE: if the physical session (Karaoke) changed, abort.
             val oldZombieCheck = currentRAM.trackKey != myTrackKey
             val newZombieCheck = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist) != myTrackKey
             InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_zombieDetector: viejo=$oldZombieCheck, nuevo=$newZombieCheck, coincide=${oldZombieCheck == newZombieCheck}")
@@ -3085,97 +3095,48 @@ class MusicNotificationListener : NotificationListenerService() {
                 lyricsUpdateJob?.cancel()
                 break
             }
-            
-            // Usamos el Snapshot Lógico para el cálculo de posición real
-            val snapshot = lastLogicalSnapshot ?: break
-            val currentPos = snapshot.projectedPositionMs()
-            
-            // Conjunto Letras-Robustez-1: línea vigente por búsqueda sobre la línea de tiempo ya
-            // saneada (LyricsTimeline.indexAt), sin indexOf por igualdad de datos.
-            val entryIdx = LyricsTimeline.indexAt(lyricsRes.allEntries, currentPos + snappinessOffset)
-            val entry = if (entryIdx != -1) lyricsRes.allEntries[entryIdx] else null
-            
-            if (entry != null) {
-                updateLyricInWidget(myTrackKey, entry.text)
-            }
 
-            val next = if (entryIdx != -1 && entryIdx < lyricsRes.allEntries.size - 1) lyricsRes.allEntries[entryIdx + 1] else null
-            
-            // Hallazgo v4.1: Regla Unificada de Silencio (Conjunto Letras-2)
-            // Un solo umbral decide cuándo alternar a mostrar el artista, tanto si el
-            // próximo verso conocido tarda de más como si ya no queda ningún verso más.
-            if (next != null) {
-                val waitTime = (next.timestampMs - (currentPos + snappinessOffset)).coerceAtLeast(100L)
-                
-                if (waitTime > LYRICS_SILENCE_THRESHOLD_MS) {
-                    delay(LYRICS_SILENCE_THRESHOLD_MS)
-                    val oldSilenceCheck = MusicStateProvider.current().trackKey == myTrackKey
-                    val newSilenceCheck = MusicDataStore.computeSessionIdentity(MusicStateProvider.current().packageName, MusicStateProvider.current().title, MusicStateProvider.current().artist) == myTrackKey
-                    InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_silencio: viejo=$oldSilenceCheck, nuevo=$newSilenceCheck, coincide=${oldSilenceCheck == newSilenceCheck}")
-                    if (currentCoroutineContext().isActive && newSilenceCheck) {
-                        updateLyricInWidget(myTrackKey, "")
-                    }
-                    delay((waitTime - LYRICS_SILENCE_THRESHOLD_MS).coerceAtLeast(100L))
-                } else {
-                    delay(waitTime)
-                }
-            } else if (entryIdx != -1) {
-                // Ya no queda ningún verso más, pero la canción sigue sonando: aplicamos
-                // la misma regla de silencio antes de ceder el lugar al nombre del artista.
-                delay(LYRICS_SILENCE_THRESHOLD_MS)
-                val oldSilenceCheck = MusicStateProvider.current().trackKey == myTrackKey
-                val newSilenceCheck = MusicDataStore.computeSessionIdentity(MusicStateProvider.current().packageName, MusicStateProvider.current().title, MusicStateProvider.current().artist) == myTrackKey
-                InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso3_silencio: viejo=$oldSilenceCheck, nuevo=$newSilenceCheck, coincide=${oldSilenceCheck == newSilenceCheck}")
-                if (currentCoroutineContext().isActive && newSilenceCheck) {
-                    updateLyricInWidget(myTrackKey, "")
-                }
-                break
-            } else if (lyricsRes.allEntries.isNotEmpty()) {
-                // Todavía no llega ninguna línea (intro largo, currentPos está antes de la
-                // primera marca de tiempo). En vez de rendirse, programamos la espera exacta
-                // hasta que llegue, en trozos del mismo umbral de silencio ya establecido, para
-                // seguir revisando la identidad de la sesión mientras tanto (Conjunto
-                // Letras-Atomicas-4).
-                val firstEntry = lyricsRes.allEntries.first()
-                val waitTime = (firstEntry.timestampMs - (currentPos + snappinessOffset)).coerceAtLeast(100L)
-                delay(waitTime.coerceAtMost(LYRICS_SILENCE_THRESHOLD_MS))
-            } else {
-                break
-            }
+            // The logical snapshot gives the real (extrapolated) playback position.
+            val snapshot = lastLogicalSnapshot ?: break
+            val frame = LyricsDisplayRules.playing(lyricsRes.allEntries, snapshot.projectedPositionMs())
+
+            // Always write the frame, including "no lyric" (empty text = artist name). Writing the
+            // same text again is harmless: the state provider ignores events that change nothing.
+            updateLyricInWidget(myTrackKey, frame.text)
+
+            // null = the frame will never change again (after the last line faded out).
+            val recheckInMs = frame.recheckInMs ?: break
+            // Never sleep longer than the silence threshold, so the identity guard above keeps
+            // running while we wait (Letras-Atomicas-4).
+            delay(recheckInMs.coerceAtMost(LyricsDisplayRules.SILENCE_AFTER_MS))
         }
     }
 
+    // Conjunto Letras-Motor-Puro-1: while paused, the widget alternates between the frozen lyric and
+    // the artist name. What the frozen lyric is lives in LyricsDisplayRules.paused (pure, tested).
     private suspend fun runPausedLyricsCycle(myTrackKey: String, lyricsRes: LyricsResult) {
         var showLyric = true
         while (currentCoroutineContext().isActive) {
-            // Conjunto Letras-Atomicas-10: espera de asentamiento antes de leer el estado.
-            // Evidencia (auditoria-log-diagnostico-showcase-ronda1.md + log crudo del
-            // 2026-09-25): el teléfono a veces envía un evento "aún no confirmado" y su
-            // corrección real con 27-75ms de diferencia. relaunchLyricsTicker puede lanzar
-            // este ciclo con una lectura de isPlaying ya obsoleta justo antes de que llegue
-            // la corrección. Esta espera le da margen a la cancelación cooperativa de
-            // Kotlin para interrumpir aquí mismo, antes de escribir nada en el widget, si
-            // la corrección (isPlaying real) llega dentro de este margen.
+            // Conjunto Letras-Atomicas-10: settling delay before reading the state. The phone
+            // sometimes sends a "not yet confirmed" event and its real correction 27-75 ms later.
+            // relaunchLyricsTicker can start this cycle with an already stale isPlaying reading just
+            // before the correction arrives. This wait gives Kotlin's cooperative cancellation room
+            // to interrupt here, before anything is written to the widget, if the correction
+            // (the real isPlaying) arrives within that margin.
             delay(300L)
             val currentRAM = MusicStateProvider.current()
             val currentSessionId = MusicDataStore.computeSessionIdentity(currentRAM.packageName, currentRAM.title, currentRAM.artist)
             if (currentSessionId != myTrackKey || currentRAM.isPlaying) break
-            
-            val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
-            
-            var lastEntry = lyricsRes.allEntries.getOrNull(LyricsTimeline.indexAt(lyricsRes.allEntries, pausedPos))
-            val fallbackFired = lastEntry == null && pausedPos < 5000L && currentLogicalSession?.hasConfirmedPlayback == true
-            // Conjunto Letras-Atomicas-8: antes, esta regla también se disparaba durante
-            // Estado=OTHER (carga), mostrando la primera línea antes de que sonara audio.
-            if (fallbackFired) {
-                lastEntry = lyricsRes.allEntries.firstOrNull()
-            }
 
-            val text = if (showLyric && lastEntry != null) lastEntry.text else ""
-            updateLyricInWidget(myTrackKey, text)
-            
+            val pausedPos = lastLogicalSnapshot?.projectedPositionMs() ?: 0L
+            // Conjunto Letras-Atomicas-8: the "first 5 seconds" fallback (show the first line when no
+            // line has been reached yet) must not fire while the song is only loading
+            // (state=OTHER), before any audio played; hasConfirmedPlayback guards that.
+            val hasConfirmedPlayback = currentLogicalSession?.hasConfirmedPlayback == true
+            updateLyricInWidget(myTrackKey, LyricsDisplayRules.paused(lyricsRes.allEntries, pausedPos, hasConfirmedPlayback, showLyric))
+
             showLyric = !showLyric
-            delay(150000L) // Conjunto Letras-Atomicas-1: restaurado a 2.5 min, valor original de diseño
+            delay(150000L) // Conjunto Letras-Atomicas-1: restored to 2.5 min, original design value
         }
     }
 
@@ -3794,7 +3755,6 @@ class MusicNotificationListener : NotificationListenerService() {
         private const val MIN_ART_DIMENSION = 100
         private const val MAX_ART_DIMENSION = 800
         private const val BUFFERING_THRESHOLD_MS = 8000L
-        private const val LYRICS_SILENCE_THRESHOLD_MS = 10000L
     private const val NORMAL_DEBOUNCE_MS = 150L
         private const val FAST_DEBOUNCE_MS = 100L
         private const val METADATA_STABILIZATION_MS = 400L
