@@ -245,6 +245,13 @@ class MusicNotificationListener : NotificationListenerService() {
     private var lyricsUpdateJob: Job? = null
     private val lyricsLock = Any()
     private var lyricsFetchJob: Job? = null
+
+    // Conjunto Letras-Relevo-Perdido-1: business identity (sessionIdentity) of the song the lyrics
+    // engine was last launched or scheduled for; null if it was never launched or was torn down with
+    // the session. Compared against the committed song by LyricsEngineGuard so that ANY processing
+    // pass can notice a missed "restart the engine" order and repair it (see the commit block).
+    @Volatile
+    private var lyricsEngineIdentity: String? = null
     private var unlockPollingJob: Job? = null
 
     // Conjunto Controles-Posicion-1: refresco periódico de la barra de progreso del widget Control.
@@ -2550,8 +2557,6 @@ class MusicNotificationListener : NotificationListenerService() {
                 appIconKey = currentInfo.appIconKey,
                 isPlaying = isPlaying,
                 isSessionActive = snapshot.isSessionActive,
-                currentLyric = if (!isSessionEnded) currentMem.currentLyric else "",
-                lyricsTrackKey = if (!isSessionEnded) currentMem.lyricsTrackKey else "",
                 playbackDeviceName = snapshot.playbackDeviceName,
                 playbackDeviceType = snapshot.playbackDeviceType,
                 durationMs = snapshot.durationMs,
@@ -2705,6 +2710,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 lyricsUpdateJob?.cancel()
                 lyricsFetchJob?.cancel()
                 loadedLyrics = null
+                lyricsEngineIdentity = MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist)
 
                 // Conjunto Letras-Atomicas-1: se lanza en el espacio de trabajo de la sesión
                 // recién creada (currentLogicalSession ya es la nueva en este punto de la
@@ -2911,6 +2917,16 @@ class MusicNotificationListener : NotificationListenerService() {
                         relaunchLyricsTicker("duration_confirmed")
                     }
 
+                    // Conjunto Letras-Relevo-Perdido-1: the "song changed" order travels on a signal
+                    // that lives in one cancellable pass (Stage 1). If a second notification cancelled
+                    // that pass, nobody restarted the engine and it kept serving the previous song until
+                    // it shut itself down. The committed state is the authority: if the engine was never
+                    // told about this song, tell it now.
+                    if (LyricsEngineGuard.needsRecovery(lyricsEngineIdentity, finalMusicInfo.sessionIdentity, finalMusicInfo.isSessionActive)) {
+                        InternalLogger.d(applicationContext, "[LYRICS_RETRY_TRACE] Motor de letras desfasado: motor=$lyricsEngineIdentity, vigente=${finalMusicInfo.sessionIdentity}. Relanzando.")
+                        relaunchLyricsTicker("identity_recovery")
+                    }
+
                     // PROMOCIÓN DE IDENTIDAD (v2.8): Ahora que el disco tiene la imagen y la llave,
                     // sincronizamos la RAM al 100% para mostrar el nuevo artwork.
                     
@@ -2957,6 +2973,7 @@ class MusicNotificationListener : NotificationListenerService() {
         if (currentInfo.isEmpty || !currentInfo.isSessionActive) {
             synchronized(lyricsLock) {
                 lyricsUpdateJob?.cancel()
+                lyricsEngineIdentity = null
             }
             return
         }
@@ -2970,6 +2987,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
         synchronized(lyricsLock) {
             lyricsUpdateJob?.cancel()
+            lyricsEngineIdentity = targetIdentity
             lyricsUpdateJob = activeSession.lyricsScope.launch {
                 // Conjunto Letras-Unificacion-1: reuse or load, decided in one place. Every trigger
                 // (Stage 1, passive sync, screen_wake, seek_event) converges there, so they can fire
