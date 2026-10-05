@@ -26,7 +26,6 @@ object MusicStateProvider {
     )
 
     private val _musicInfoState = MutableStateFlow<MusicInfo>(safeInitialState)
-    val musicInfoState: StateFlow<MusicInfo> = _musicInfoState.asStateFlow()
 
     // Conjunto Identidad-Atómica-Presentación-1: espejo de _musicInfoState que solo se actualiza
     // cuando la identidad está 100% lista para mostrarse (isPresentationReady == true). Esta es
@@ -45,7 +44,7 @@ object MusicStateProvider {
             is MusicUpdateEvent.MetadataRefinement -> reconcileRefinement(current, event)
             is MusicUpdateEvent.ArtworkResolved -> reconcileArtwork(current, event)
             is MusicUpdateEvent.LyricTick -> reconcileLyric(current, event)
-            is MusicUpdateEvent.SessionEnded -> reconcileEnd(current, event)
+            is MusicUpdateEvent.SessionEnded -> reconcileEnd(current)
             is MusicUpdateEvent.StatusUpdate -> reconcileStatus(current, event)
             is MusicUpdateEvent.ClearVisualHistory -> current.copy(history = emptyList())
         }
@@ -145,7 +144,7 @@ object MusicStateProvider {
         )
     }
 
-    private fun reconcileEnd(current: MusicInfo, e: MusicUpdateEvent.SessionEnded): MusicInfo {
+    private fun reconcileEnd(current: MusicInfo): MusicInfo {
         val shouldResetClock = current.isPlaying
         return current.copy(
             isSessionActive = false,
@@ -181,7 +180,7 @@ sealed class MusicUpdateEvent {
     data class MetadataRefinement(val newTrackKey: String, val newArtworkKey: String, val newDuration: Long, val isPlaying: Boolean) : MusicUpdateEvent()
     data class ArtworkResolved(val trackKey: String, val artworkKey: String, val iconKey: String? = null) : MusicUpdateEvent()
     data class LyricTick(val lyric: String, val trackKey: String) : MusicUpdateEvent()
-    data class SessionEnded(val finalPos: Long) : MusicUpdateEvent()
+    object SessionEnded : MusicUpdateEvent()
     data class StatusUpdate(val isPlaying: Boolean, val deviceName: String, val deviceType: Int, val isBuffering: Boolean = false) : MusicUpdateEvent()
     object ClearVisualHistory : MusicUpdateEvent()
 }

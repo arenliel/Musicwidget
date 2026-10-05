@@ -4,10 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.Build
 import android.util.Log
 import android.util.LruCache
-import android.appwidget.AppWidgetManager
 import android.widget.RemoteViews
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -38,7 +36,6 @@ import androidx.glance.appwidget.action.actionStartActivity
 import androidx.glance.appwidget.cornerRadius
 import androidx.glance.appwidget.lazy.LazyColumn
 import androidx.glance.appwidget.lazy.items
-import androidx.glance.appwidget.lazy.itemsIndexed
 import androidx.glance.appwidget.provideContent
 import androidx.glance.appwidget.updateAll
 import androidx.glance.background
@@ -55,22 +52,14 @@ import androidx.glance.layout.height
 import androidx.glance.layout.padding
 import androidx.glance.layout.size
 import androidx.glance.layout.width
-import androidx.glance.unit.ColorProvider
 import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.glance.preview.ExperimentalGlancePreviewApi
 import androidx.glance.preview.Preview
-import androidx.core.app.NotificationManagerCompat
-import android.os.PowerManager
-import android.provider.Settings
-import android.content.ComponentName
 import android.net.Uri
-import androidx.glance.appwidget.GlanceAppWidgetManager
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.MainScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -155,8 +144,6 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
             }
         }
 
-        fun clearMemoryCache() { bitmapCache.evictAll() }
-
         // Conjunto DataStore-Choke-Point-1: Glance mantiene internamente un DataStore de
         // preferencias por appWidgetId (PreferencesGlanceStateDefinition) que no tolera dos
         // aperturas concurrentes para el mismo archivo. Antes, updateAll() no tenía ninguna
@@ -226,18 +213,13 @@ open class MusicWidget(protected val appearance: WidgetAppearance) : GlanceAppWi
     }
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val dataStore = MusicDataStore(context)
-        
         provideContent {
             // Conjunto Identidad-Atómica-Presentación-1: el widget deja de leer la verdad interna
             // (siempre al día, incluso a medio resolver) y pasa a leer la verdad retenida — solo
             // se actualiza cuando título, artista, portada y las 4 métricas están confirmados.
             val memInfo by MusicStateProvider.presentedInfoState.collectAsState()
-            val diskInfo by dataStore.musicInfoFlow.collectAsState(
-                initial = MusicNotificationListener.getLatestMusicInfo() ?: MusicInfo(title = "", artist = "", packageName = "")
-            )
 
-            val musicInfo = memInfo ?: diskInfo
+            val musicInfo = memInfo
             
             val widgetSize = LocalSize.current
             val context = LocalContext.current

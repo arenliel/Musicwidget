@@ -1,7 +1,6 @@
 package arenliel.musicwidget
 
 import android.app.Notification
-import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.graphics.Bitmap
@@ -51,7 +50,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.NonCancellable
 import kotlin.math.max
@@ -148,12 +146,7 @@ class MusicNotificationListener : NotificationListenerService() {
     private data class TrackIdentity(val title: String, val artist: String) {
         val coreKey: String get() = "$title|$artist"
         
-        companion object {
-            fun from(snapshot: MediaSnapshot) = TrackIdentity(
-                title = snapshot.title.trim().lowercase(),
-                artist = snapshot.artist.trim().lowercase()
-            )
-        }
+
     }
 
     /*
@@ -203,8 +196,7 @@ class MusicNotificationListener : NotificationListenerService() {
         // instancia (cada canción) nace con su propio valor en false; no requiere reinicio manual.
         var firstLyricDisplayLogged: Boolean = false,
         val startedAtRealtime: Long = android.os.SystemClock.elapsedRealtime(),
-        var playbackContext: PlaybackContext,
-        val context: Context
+        var playbackContext: PlaybackContext
     ) {
         val sessionIdentity: String get() = "${birthSnapshot.packageName}|${identity.title}|${identity.artist}"
 
@@ -307,12 +299,7 @@ class MusicNotificationListener : NotificationListenerService() {
      */
     private var inFlightSnapshot: MediaSnapshot? = null
 
-    /*
-     * Control de visibilidad para Screen-Gated Rendering.
-     */
-    @Volatile
-    private var isPresentationDirty: Boolean = false
-    private var pendingSnapshot: MediaSnapshot? = null
+
 
     /*
      * DEDUPLICADOR DE EVENTOS (Capa de Negocio)
@@ -322,10 +309,7 @@ class MusicNotificationListener : NotificationListenerService() {
     private var lastProcessedOutcome: String? = null
     private var lastProcessedSessionUUID: String? = null
 
-    /*
-     * MONOTONIC GUARD (v4.5): Rastrea el progreso para detectar bucles (loops).
-     */
-    private var lastObservedPositionMs = 0L
+
 
     private sealed class HistoryEvent {
         data class CommitSession(
@@ -605,7 +589,6 @@ class MusicNotificationListener : NotificationListenerService() {
         val title: String,
         val artist: String,
         val album: String?,
-        val mediaId: String?,
         val artworkUri: String?,
         val playbackState: Int,
         val isSessionActive: Boolean,
@@ -614,7 +597,6 @@ class MusicNotificationListener : NotificationListenerService() {
         val positionMs: Long = 0L,
         val recordedAt: Long = System.currentTimeMillis(),
         val artworkSource: ArtworkSource = ArtworkSource.Placeholder,
-        val firstObservedAt: Long = recordedAt,
         val observedAtRealtime: Long = SystemClock.elapsedRealtime(),
         val positionUpdatedAtRealtime: Long = observedAtRealtime,
         val playbackSpeed: Float = 1.0f,
@@ -688,7 +670,6 @@ class MusicNotificationListener : NotificationListenerService() {
                     title = info.title,
                     artist = info.artist,
                     album = info.album,
-                    mediaId = "",
                     // Conjunto Identidad-Rehidratacion-1: se usa info.artworkKey (la clave cruda de
                     // deduplicación que el propio código ya preserva correctamente) en vez de
                     // info.artworkUri (que, una vez resuelta la portada, es la ruta LOCAL del
@@ -1378,8 +1359,7 @@ class MusicNotificationListener : NotificationListenerService() {
                         album = currentInfo.album,
                         artworkKey = currentInfo.artworkKey,
                         confirmedArtworkKey = rehydratedArtworkKey
-                    ),
-                    context = this@MusicNotificationListener
+                    )
                 )
                 
                 InternalLogger.d(applicationContext, "[HIST_BOOT] REHYDRATED: uuid=${currentInfo.sessionUUID}, identity=$recoveredIdentity")
@@ -1598,7 +1578,7 @@ class MusicNotificationListener : NotificationListenerService() {
                                     )
                                     musicDataStore.saveMusicInfo(pendingInfo)
                                     
-                                    MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(finalPos))
+                                    MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded)
                                     uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
                                     
                                     InternalLogger.d(applicationContext, "[FSM] Sesión interrumpida (UUID=${session.sessionUUID}). Marcada como pendiente de compromiso.")
@@ -1738,8 +1718,7 @@ class MusicNotificationListener : NotificationListenerService() {
                         }
                     }
                     
-                    val finalPos = last.projectedPositionMs()
-                    if (MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(finalPos))) {
+                    if (MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded)) {
                         uiUpdateFlow.tryEmit(UpdateEvent.StatusUpdate)
                     }
                 }
@@ -1924,11 +1903,6 @@ class MusicNotificationListener : NotificationListenerService() {
                 MediaMetadata.METADATA_KEY_ALBUM
             )
 
-        val mediaId =
-            metadata.getString(
-                MediaMetadata.METADATA_KEY_MEDIA_ID
-            )
-
         val hasBitmap = metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) != null
         val rawUri = metadata.getString(MediaMetadata.METADATA_KEY_ART_URI) ?: metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
         InternalLogger.d(applicationContext, "[ART_TRACE] createSnapshot: tieneBitmapEmbebido=$hasBitmap, artworkUriCruda=$rawUri")
@@ -1963,7 +1937,6 @@ class MusicNotificationListener : NotificationListenerService() {
         val deviceName = cachedAudioDeviceName
         val deviceType = cachedAudioDeviceType
 
-        val trackKeyStr = "$title|$artist|$duration"
         val myCoreKey = "$title|$artist".trim().lowercase()
 
         // FASE A: Captura Inmediata (Segundo 0)
@@ -2024,7 +1997,6 @@ class MusicNotificationListener : NotificationListenerService() {
             title = title,
             artist = artist,
             album = album,
-            mediaId = mediaId,
             artworkUri = artworkUri,
             playbackState = playbackState,
             isSessionActive = true,
@@ -2268,7 +2240,7 @@ class MusicNotificationListener : NotificationListenerService() {
 
             // Hallazgo v3.4: Limpieza preventiva de RAM en transición
             serviceScope.launch {
-                MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded(0L)) // Simulamos fin de sesión
+                MusicStateProvider.applyEvent(MusicUpdateEvent.SessionEnded) // Simulamos fin de sesión
             }
 
             // Conjunto Icono-Precalentado-1: precalentamos el registro permanente de iconos
@@ -2306,12 +2278,6 @@ class MusicNotificationListener : NotificationListenerService() {
         }
 
         val isSameSession = session?.sessionIdentity == rawSnapshot.sessionIdentity
-        
-        val firstObservedAt = if (isSameSession && session != null) {
-            session.startedAtRealtime // Usar el inicio real de la sesión (v9.0)
-        } else {
-            rawSnapshot.recordedAt
-        }
 
         // --- PURGA DE TRANSICIÓN Y PROTECCIÓN DE HERENCIA (v9.0: Sede única en session) ---
         // Bloqueamos la herencia de marcas de agua (maxPositionMs) y assets si el título cambia.
@@ -2319,7 +2285,6 @@ class MusicNotificationListener : NotificationListenerService() {
         val canInheritAssets = isSameSession && rawSnapshot.title == session?.identity?.title && rawSnapshot.title.isNotBlank()
 
         val snapshot = rawSnapshot.copy(
-            firstObservedAt = firstObservedAt,
             artworkSource = if (canInheritAssets) (session?.birthSnapshot?.artworkSource ?: rawSnapshot.artworkSource) else rawSnapshot.artworkSource
         )
 
@@ -2471,8 +2436,7 @@ class MusicNotificationListener : NotificationListenerService() {
                 liveSnapshot = rawSnapshot,
                 frozenTrackKey = rawSnapshot.trackKey, // Capturado al nacer (v6.5)
                 maxPositionMs = rawSnapshot.positionMs, // v9.0: Reset marca de agua
-                playbackContext = newContext,
-                context = this@MusicNotificationListener
+                playbackContext = newContext
             )
             InternalLogger.d(applicationContext, "[ART_TRACE] Sesión saliente antes de reemplazo: UUID=${session?.sessionUUID}, artworkKey=${session?.playbackContext?.artworkKey}")
             // Conjunto Letras-Atomicas-1: cerramos el espacio de trabajo de letras de la sesión
@@ -2533,7 +2497,6 @@ class MusicNotificationListener : NotificationListenerService() {
             durationMs = rawSnapshot.durationMs
         )
         ensureProgressTicker(isPlayingHint = rawSnapshot.playbackState == PlaybackState.STATE_PLAYING)
-        lastObservedPositionMs = currentProjectedPos
 
         // ACTIVE WATCHER (v4.3.1): Cronómetro proactivo de 5s con LATE-READ
         if (snapshot.playbackState == PlaybackState.STATE_PLAYING && (trackContentChanged || eagerCacheJob == null)) {
@@ -2629,17 +2592,11 @@ class MusicNotificationListener : NotificationListenerService() {
         // Si es visible, dejamos que el Stage 2 maneje la persistencia final para evitar race conditions.
         if (!isWidgetPotentiallyVisible()) {
             serviceScope.launch {
-                val currentInfo = musicDataStore.musicInfoFlow.first()
+
                 val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
-                val oldCanKeepLyric = snapshot.isSessionActive && snapshot.trackKey == currentInfo.lyricsTrackKey
-                val canKeepLyric = snapshot.isSessionActive &&
-                    currentInfo.lyricsTrackKey.isNotBlank() &&
-                    MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
-                        MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
-                InternalLogger.d(applicationContext, "[IDENTITY_TRACE] Paso6_canKeepLyricStage1: viejo=$oldCanKeepLyric, nuevo=$canKeepLyric, coincide=${oldCanKeepLyric == canKeepLyric}")
+
                 
-                val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
-                val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
+
 
                 val logicalMusicInfo = MusicInfo(
                     title = snapshot.title,
@@ -2651,8 +2608,6 @@ class MusicNotificationListener : NotificationListenerService() {
                     appIconKey = savedAppIconKey ?: "",
                     isPlaying = isPlaying,
                     isSessionActive = snapshot.isSessionActive,
-                    currentLyric = finalLyric,
-                    lyricsTrackKey = finalLyricKey,
                     playbackDeviceName = snapshot.playbackDeviceName,
                     playbackDeviceType = snapshot.playbackDeviceType,
                     durationMs = snapshot.durationMs,
@@ -2660,10 +2615,7 @@ class MusicNotificationListener : NotificationListenerService() {
                     isPendingCommit = false, // Reconciliación exitosa (v6.7)
                     lastMaxPositionMs = session?.maxPositionMs ?: snapshot.positionMs
                 )
-                val changed = musicDataStore.saveMusicInfo(logicalMusicInfo, forceUpdate = false)
-                if (changed) {
-                    lastCommittedInfo = logicalMusicInfo
-                }
+                musicDataStore.saveMusicInfo(logicalMusicInfo, forceUpdate = false)
             }
         }
 
@@ -2676,9 +2628,6 @@ class MusicNotificationListener : NotificationListenerService() {
             // history. This is a deliberate battery-saving tradeoff, not an oversight.
             Log.d(TAG, "[GATING] Presentación suprimida (Pantalla apagada/bloqueada).")
             InternalLogger.log(applicationContext, "STAGE 2: Suprimido (Pantalla bloqueada). Track=${snapshot.title}")
-            isPresentationDirty = true
-            pendingSnapshot = snapshot
-            
             // Destrucción de Ticker de Letras para ahorro de batería
             lyricsUpdateJob?.cancel()
             
@@ -2686,10 +2635,6 @@ class MusicNotificationListener : NotificationListenerService() {
             lastObservedSnapshot = snapshot
             return
         }
-
-        // Si el widget es visible, reseteamos flags de gating
-        isPresentationDirty = false
-        pendingSnapshot = null
 
         val oldTrackChangedUI = previousLogical?.trackKey != snapshot.trackKey
         val trackChangedUI = 
@@ -2888,15 +2833,6 @@ class MusicNotificationListener : NotificationListenerService() {
 
                     val currentInfo = musicDataStore.musicInfoFlow.first()
                     val isPlaying = snapshot.playbackState == PlaybackState.STATE_PLAYING
-                    val canKeepLyric = snapshot.isSessionActive &&
-                        currentInfo.lyricsTrackKey.isNotBlank() &&
-                        MusicDataStore.computeSessionIdentity(snapshot.packageName, snapshot.title, snapshot.artist) ==
-                            MusicDataStore.computeSessionIdentity(currentInfo.packageName, currentInfo.title, currentInfo.artist)
-                    
-                    val finalLyric = if (canKeepLyric) currentInfo.currentLyric else ""
-                    // Preservar currentInfo.lyricsTrackKey (ya en formato sessionIdentity), nunca
-                    // snapshot.trackKey (incluye duración) (Conjunto Letras-Atomicas-3).
-                    val finalLyricKey = if (canKeepLyric) currentInfo.lyricsTrackKey else ""
 
                     val songStats = musicDataStore.getStatsFor(snapshot.title, snapshot.artist)
 
@@ -2934,8 +2870,6 @@ class MusicNotificationListener : NotificationListenerService() {
                         appIconKey = savedAppIconKey ?: "",
                         isPlaying = isPlaying,
                         isSessionActive = snapshot.isSessionActive,
-                        currentLyric = finalLyric,
-                        lyricsTrackKey = finalLyricKey,
                         playbackDeviceName = snapshot.playbackDeviceName,
                         playbackDeviceType = snapshot.playbackDeviceType,
                         durationMs = snapshot.durationMs,
@@ -2989,7 +2923,6 @@ class MusicNotificationListener : NotificationListenerService() {
                     }
                     
                     lastObservedSnapshot = snapshot
-                    lastCommittedInfo = MusicStateProvider.current()
                 }
             }
 
@@ -3347,7 +3280,7 @@ class MusicNotificationListener : NotificationListenerService() {
             }
             val deferred = serviceScope.async {
                 try {
-                    val bitmap = findRealAlbumArt(snapshot, controller, metadata)
+                    val bitmap = findRealAlbumArt(snapshot, metadata)
                     
                     // Solo guardamos en caché si la sesión sigue siendo relevante para esta generación
                     // o si es una petición de historial (generation == -1)
@@ -3386,7 +3319,6 @@ class MusicNotificationListener : NotificationListenerService() {
 
     private suspend fun findRealAlbumArt(
         snapshot: MediaSnapshot,
-        controller: MediaController?,
         metadata: MediaMetadata?
     ): Bitmap? = withContext(Dispatchers.IO) {
         val minArtDimension = MIN_ART_DIMENSION
@@ -3737,8 +3669,6 @@ class MusicNotificationListener : NotificationListenerService() {
         // menor a esto se explica por el simple paso del tiempo entre la lectura y la
         // comparación, no es una divergencia real.
         private const val RECONCILE_POSITION_TOLERANCE_MS = 800L
-        private var lastCommittedInfo: MusicInfo? = null
-        fun getLatestMusicInfo(): MusicInfo? = lastCommittedInfo
 
         private const val TIER_NONE = 0
         private const val TIER_COLOR = 1
@@ -3760,7 +3690,6 @@ class MusicNotificationListener : NotificationListenerService() {
         private const val NETWORK_CONNECT_TIMEOUT_MS = 2000
         private const val NETWORK_READ_TIMEOUT_MS = 2000
         private const val ARTWORK_CACHE_SIZE_KB = 8 * 1024
-        private const val ARTWORK_TIMEOUT_MS = 7000L
         // Conjunto Portada-Reintento-Red-1: antes ARTWORK_PROMOTION_TIMEOUT_MS (3500ms) era
         // MENOR que el peor caso de un solo intento de descarga (hasta 6000ms con los timeouts
         // anteriores de 3000+3000) — el límite externo cortaba la descarga antes de que ella

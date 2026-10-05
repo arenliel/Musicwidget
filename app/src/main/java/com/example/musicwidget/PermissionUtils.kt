@@ -202,8 +202,7 @@ object PermissionUtils {
                     AppItem(
                         name = pm.getApplicationLabel(appInfo).toString(),
                         packageName = pkg,
-                        icon = pm.getApplicationIcon(appInfo),
-                        isEnabled = appInfo.enabled
+                        icon = pm.getApplicationIcon(appInfo)
                     )
                 }.getOrNull()
             }

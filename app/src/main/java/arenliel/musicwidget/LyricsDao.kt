@@ -16,12 +16,6 @@ interface LyricsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLyrics(lyrics: LyricsEntity)
 
-    @Query("UPDATE lyrics_cache SET lastAccessed = :timestamp WHERE trackKey = :trackKey")
-    suspend fun updateLastAccessed(trackKey: String, timestamp: Long)
-
-    @Query("DELETE FROM lyrics_cache WHERE lastAccessed < :threshold")
-    suspend fun purgeOldLyrics(threshold: Long)
-
     @Query("DELETE FROM lyrics_cache WHERE trackKey = :trackKey")
     suspend fun deleteLyrics(trackKey: String)
 }

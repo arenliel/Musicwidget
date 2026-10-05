@@ -269,31 +269,7 @@ data class BlessedSong(
     val lastCompletedEpochDay: Long = 0L
 )
 
-/**
- * Identidad visual de la racha/repetición.
- */
-enum class RepeatBadge {
-    NONE,
-    HOT_TODAY,      // Umbral: 3 veces hoy
-    ONGOING_STREAK  // Umbral: 3 días seguidos
-}
 
-/**
- * Motor Maestro de Umbrales: Determina si una canción merece un badge.
- */
-fun badgeFor(stats: RepeatStats?, todayEpochDay: Long): RepeatBadge {
-    if (stats == null) return RepeatBadge.NONE
-    
-    // Si el gap es mayor a 1 día, la racha se rompió lógicamente
-    val gap = todayEpochDay - stats.lastPlayedEpochDay
-    if (gap > 1) return RepeatBadge.NONE
-
-    return when {
-        stats.streakDays >= 3 -> RepeatBadge.ONGOING_STREAK
-        gap == 0L && stats.playsToday >= 3 -> RepeatBadge.HOT_TODAY
-        else -> RepeatBadge.NONE
-    }
-}
 
 class MusicDataStore(
     private val context: Context
@@ -926,18 +902,7 @@ class MusicDataStore(
         }
     }
 
-    private fun resetSkipStreakInternal(prefs: androidx.datastore.preferences.core.MutablePreferences, title: String, artist: String) {
-        val json = prefs[SKIP_STREAKS].orEmpty()
-        if (json.isBlank()) return
-        runCatching {
-            val obj = JSONObject(json)
-            val identity = "$title|$artist"
-            if (obj.has(identity)) {
-                obj.remove(identity)
-                prefs[SKIP_STREAKS] = obj.toString()
-            }
-        }
-    }
+
 
     /**
      * Actualiza y persiste la racha de skips para una canción.
@@ -1158,25 +1123,7 @@ class MusicDataStore(
         }
     }
 
-    /**
-     * Actualización quirúrgica de letras.
-     * NO toca el estado de reproducción ni otros metadatos para evitar conflictos de concurrencia.
-     * @return true si la letra cambió realmente.
-     */
-    suspend fun updateLyricsOnly(lyric: String, trackKey: String): Boolean {
-        var changed = false
-        context.dataStore.edit { prefs ->
-            // Solo escribimos si el trackKey coincide y la letra cambió para evitar recomposiciones innecesarias
-            val currentTrack = prefs[TRACK_KEY] ?: ""
-            val currentLyric = prefs[CURRENT_LYRIC] ?: ""
-            if (currentTrack == trackKey && currentLyric != lyric) {
-                prefs[CURRENT_LYRIC] = lyric
-                prefs[LYRICS_TRACK_KEY] = trackKey
-                changed = true
-            }
-        }
-        return changed
-    }
+
 
     /**
      * Limpia el historial de reproducción.

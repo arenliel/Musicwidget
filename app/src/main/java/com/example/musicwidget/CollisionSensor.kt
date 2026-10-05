@@ -8,8 +8,7 @@ enum class WidgetLayout { STACKED, FULL_BLEED }
 data class CollisionResult(
     val pillSize: Dp,
     val maxArtistLines: Int,
-    val layoutType: WidgetLayout,
-    val hasCollision: Boolean
+    val layoutType: WidgetLayout
 )
 
 /**
@@ -110,8 +109,7 @@ object CollisionSensor {
             return CollisionResult(
                 pillSize = 0.dp, 
                 maxArtistLines = 1, 
-                layoutType = WidgetLayout.FULL_BLEED,
-                hasCollision = false
+                layoutType = WidgetLayout.FULL_BLEED
             )
         }
 
@@ -158,8 +156,7 @@ object CollisionSensor {
         return CollisionResult(
             pillSize = pillSizeDp,
             maxArtistLines = maxArtistLines,
-            layoutType = layoutType,
-            hasCollision = hasCollision
+            layoutType = layoutType
         )
     }
 

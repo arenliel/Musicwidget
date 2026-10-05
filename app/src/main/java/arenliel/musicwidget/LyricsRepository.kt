@@ -15,7 +15,6 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 
 data class LyricsEntry(val timestampMs: Long, val text: String)
@@ -106,8 +105,7 @@ class LyricsRepository(private val context: Context) {
                     android.util.Log.d("LYRICS_RETRY_TRACE", "Letra guardada con lineas descartadas, re-consultando: trackKey=$trackKey, msDesdeUltimoFetch=${now - cached.timestampFetched}")
                 }
                 if (now - cached.timestampFetched < FOUND_TTL_MS && !repairRetryDue) {
-                    lyricsDao.updateLastAccessed(trackKey, now)
-                    return@withContext parseStoredLyrics(trackKey, cached.syncedLyrics ?: "", durationMs)
+                    return@withContext parseLrc(trackKey, cached.syncedLyrics ?: "")
                 }
                 android.util.Log.d("LYRICS_RETRY_TRACE", "TTL de contenido vencido, re-consultando: trackKey=$trackKey, msDesdeUltimoFetch=${now - cached.timestampFetched}")
             }
@@ -133,7 +131,7 @@ class LyricsRepository(private val context: Context) {
         }
 
         return@withContext when (val outcome = fetchCoalesced(trackKey, artist, title, durationMs / 1000)) {
-            is FetchOutcome.Found -> parseLrc(trackKey, outcome.lrc, durationMs)
+            is FetchOutcome.Found -> parseLrc(trackKey, outcome.lrc)
             // Conjunto Letras-Robustez-1: la persistencia (Room) y el cooldown los realiza la propia
             // consulta compartida (ver persistOutcome), no cada llamador.
             is FetchOutcome.NotFound -> null
@@ -397,11 +395,7 @@ class LyricsRepository(private val context: Context) {
         FetchOutcome.Unconfirmed
     }
 
-    private fun parseStoredLyrics(trackKey: String, lrc: String, durationMs: Long): LyricsResult {
-        return parseLrc(trackKey, lrc, durationMs)
-    }
-
-    fun parseLrc(trackKey: String, lrc: String, durationMs: Long): LyricsResult {
+    fun parseLrc(trackKey: String, lrc: String): LyricsResult {
         // Conjunto Letras-Robustez-1: la interpretación del LRC y la garantía de línea de tiempo
         // coherente viven en LyricsTimeline (lógica pura, con pruebas unitarias).
         val parsed = LyricsTimeline.parse(lrc)
